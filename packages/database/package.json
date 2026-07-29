@@ -10,6 +10,8 @@
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:validate": "prisma validate",
     "db:studio": "prisma studio",
     "lint": "echo \"@legaltech/database: no lint configured\"",
     "clean": "rimraf dist"

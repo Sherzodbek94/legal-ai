@@ -6,8 +6,8 @@ export class DocumentController {
   constructor(private readonly documentService: DocumentService) {}
 
   @Get()
-  findAll(@Query('matterId') matterId?: string) {
-    return this.documentService.findAll(matterId);
+  findAll(@Query('companyId') companyId?: string) {
+    return this.documentService.findAll(companyId);
   }
 
   @Get(':id')

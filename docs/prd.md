@@ -74,19 +74,54 @@ management with modern AI document analysis.
 - **AI provider:** Anthropic Claude (via `ANTHROPIC_API_KEY`).
 - **Storage:** S3-compatible object storage for uploaded documents.
 
-## 7. Data Model (initial)
+## 7. Data Model
 
 Defined in `packages/database/prisma/schema.prisma`:
 
-- `Organization` — a law firm / tenant.
-- `User` — belongs to an `Organization`, has a `UserRole`, can be assigned to
-  multiple `Matter`s.
-- `Matter` — belongs to an `Organization`, has a `MatterStatus`, has many
-  `Document`s and assignees.
-- `Document` — belongs to a `Matter`, has a `DocumentStatus` and an optional
-  AI-generated `aiSummary`.
+**Identity**
+- `User` — platform account (`UserRole`: `SUPER_ADMIN` / `USER`). Tenant
+  permissions live on `CompanyMember`, not here.
+- `RefreshToken` — hashed rotating session tokens, with `revokedAt` and a hard
+  `expiresAt` sweep.
 
-This is intentionally minimal for MVP and expected to evolve (e.g. adding
+**Tenancy**
+- `Company` — a law firm / tenant; the root of every tenant-scoped query.
+- `CompanyMember` — join of `User` × `Company` carrying a
+  `CompanyMemberRole` (`OWNER`, `ADMIN`, `ATTORNEY`, `PARALEGAL`, `VIEWER`),
+  unique per pair.
+
+**Templates and retrieval**
+- `DocumentTemplate` — reusable clause/contract template, body stored as
+  TipTap editor JSON, versioned and unique per `(companyId, slug)`.
+- `TemplateEmbedding` — chunked template text plus a `pgvector`
+  `vector(1024)` embedding for semantic retrieval, indexed with HNSW /
+  `vector_cosine_ops`. Derived data: rebuilt rather than soft-deleted.
+
+**Generated output**
+- `GeneratedDocument` — an AI-generated document belonging to a `Company`,
+  optionally derived from a `DocumentTemplate`, retaining its
+  `promptVariables` for reproducibility.
+
+**Billing**
+- `Subscription` — one per `Company`, with plan/status and billing-provider
+  identifiers.
+- `PaymentTransaction` — immutable financial ledger in minor units;
+  corrections are new rows, never edits.
+
+**Audit**
+- `AuditLog` — append-only trail (no `updatedAt`, no `deletedAt`) of actions
+  against entities, retained by time-based pruning.
+
+### Soft delete
+
+Mutable, user-facing models carry `deletedAt` and are filtered out of all read
+paths: `User`, `Company`, `CompanyMember`, `DocumentTemplate`,
+`GeneratedDocument`, `Subscription`. It is deliberately **omitted** from
+`AuditLog` and `PaymentTransaction` (records that must not be editable or
+hideable to remain audit-worthy), `RefreshToken` (`revokedAt` already models
+invalidation), and `TemplateEmbedding` (derived, cascades with its template).
+
+This is expected to evolve (e.g. adding
 audit logs, billing entities, client-portal-specific models).
 
 ## 8. Non-Functional Requirements
@@ -107,9 +142,10 @@ audit logs, billing entities, client-portal-specific models).
 
 1. **M0 — Monorepo scaffold** (this document's companion change): Turborepo
    structure, Next.js web shell, NestJS API shell, shared Prisma package.
-2. **M1 — Auth & Organizations:** login, org creation, role-based access.
-3. **M2 — Matter & Document CRUD:** end-to-end matter/document management UI
-   and API.
+2. **M1 — Auth & Companies:** login with refresh-token rotation, company
+   creation, role-based access via `CompanyMember`.
+3. **M2 — Template & Document CRUD:** end-to-end template and generated-document
+   management UI and API.
 4. **M3 — AI Analysis Pipeline:** async document summarization via Claude,
    status updates surfaced in the UI.
 5. **M4 — Client Portal (beta):** read-only client access to shared matters

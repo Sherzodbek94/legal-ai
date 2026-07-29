@@ -1,75 +1,374 @@
+// LegalTech SaaS — PostgreSQL schema.
+//
+// Conventions used throughout:
+//   * Multi-tenancy: every tenant-owned row carries `companyId`, and composite
+//     indexes lead with it so tenant-scoped queries stay index-only.
+//   * Soft delete: `deletedAt` marks a row as logically removed. Immutable
+//     records (AuditLog, PaymentTransaction) deliberately omit it — see notes
+//     on those models.
+//   * Timestamps: `createdAt` / `updatedAt` on every mutable model.
+
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
 }
 
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// Platform-wide role. Tenant-scoped permissions live on CompanyMember.
 enum UserRole {
+  SUPER_ADMIN
+  USER
+}
+
+/// Role a user holds within a single company.
+enum CompanyMemberRole {
+  OWNER
   ADMIN
   ATTORNEY
   PARALEGAL
-  CLIENT
+  VIEWER
 }
 
-enum MatterStatus {
-  OPEN
-  IN_REVIEW
-  CLOSED
+enum TemplateStatus {
+  DRAFT
+  PUBLISHED
   ARCHIVED
 }
 
-enum DocumentStatus {
-  UPLOADED
-  PROCESSING
-  ANALYZED
+enum GeneratedDocumentStatus {
+  DRAFT
+  GENERATING
+  GENERATED
   FAILED
+  FINALIZED
 }
 
-model Organization {
-  id        String   @id @default(cuid())
-  name      String
-  users     User[]
-  matters   Matter[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+enum SubscriptionPlan {
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
 }
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+  UNPAID
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  EXPORT
+  SHARE
+  GENERATE
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
 
 model User {
-  id             String       @id @default(cuid())
-  email          String       @unique
-  name           String?
-  role           UserRole     @default(ATTORNEY)
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  matters        Matter[]     @relation("MatterAssignees")
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String?
+  name          String?
+  role          UserRole  @default(USER)
+  emailVerified DateTime?
+  lastLoginAt   DateTime?
+
+  refreshTokens      RefreshToken[]
+  memberships        CompanyMember[]
+  generatedDocuments GeneratedDocument[]
+  auditLogs          AuditLog[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // NOTE: `email` is globally unique, so a soft-deleted user still occupies its
+  // address. Reclaiming it requires either a hard delete or tombstoning the
+  // value (e.g. `deleted+<id>@…`) during the soft-delete transaction.
+  @@index([deletedAt])
+  @@index([role, deletedAt])
+  @@map("users")
 }
 
-model Matter {
-  id             String       @id @default(cuid())
-  title          String
-  clientName     String
-  status         MatterStatus @default(OPEN)
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  assignees      User[]       @relation("MatterAssignees")
-  documents      Document[]
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+/// Opaque refresh tokens for rotating JWT sessions. Only the hash is stored so
+/// a database disclosure cannot be replayed against the auth endpoint.
+model RefreshToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revokedAt DateTime?
+  userAgent String?
+  ipAddress String?
+  createdAt DateTime  @default(now())
+
+  // Sessions are hard-deleted on expiry sweeps rather than soft-deleted:
+  // `revokedAt` already models logical invalidation.
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
 }
 
-model Document {
-  id        String         @id @default(cuid())
-  fileName  String
-  fileUrl   String
-  status    DocumentStatus @default(UPLOADED)
-  aiSummary String?
-  matter    Matter         @relation(fields: [matterId], references: [id])
-  matterId  String
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Company {
+  id      String  @id @default(cuid())
+  name    String
+  slug    String  @unique
+  website String?
+
+  members             CompanyMember[]
+  templates           DocumentTemplate[]
+  generatedDocuments  GeneratedDocument[]
+  subscription        Subscription?
+  paymentTransactions PaymentTransaction[]
+  auditLogs           AuditLog[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([deletedAt])
+  @@map("companies")
+}
+
+model CompanyMember {
+  id        String            @id @default(cuid())
+  companyId String
+  company   Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      CompanyMemberRole @default(ATTORNEY)
+  invitedAt DateTime?
+  joinedAt  DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // One membership row per (company, user) pair. Because this is a hard unique
+  // constraint, re-inviting a soft-deleted member reactivates the existing row
+  // (clear `deletedAt`) rather than inserting a second one.
+  @@unique([companyId, userId])
+  @@index([companyId, role, deletedAt])
+  @@index([userId, deletedAt])
+  @@map("company_members")
+}
+
+// ---------------------------------------------------------------------------
+// Templates and retrieval
+// ---------------------------------------------------------------------------
+
+model DocumentTemplate {
+  id          String         @id @default(cuid())
+  companyId   String
+  company     Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name        String
+  slug        String
+  description String?
+  category    String?
+  /// Template body, stored as editor JSON (TipTap document node).
+  content     Json
+  status      TemplateStatus @default(DRAFT)
+  version     Int            @default(1)
+
+  embeddings         TemplateEmbedding[]
+  generatedDocuments GeneratedDocument[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@unique([companyId, slug])
+  @@index([companyId, status, deletedAt])
+  @@index([companyId, category])
+  @@map("document_templates")
+}
+
+/// Chunked template text plus its embedding vector, for semantic retrieval.
+///
+/// Dimension note: sized for `voyage-law-2` (1024 dims) — Voyage is Anthropic's
+/// recommended embedding partner and this model is legal-domain tuned. The
+/// column width is fixed at the database level, so switching providers (e.g.
+/// OpenAI `text-embedding-3-small` at 1536) requires a migration, not just a
+/// config change. `embeddingModel` records what actually produced each row.
+model TemplateEmbedding {
+  id         String           @id @default(cuid())
+  templateId String
+  template   DocumentTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  chunkIndex     Int
+  content        String
+  embeddingModel String @default("voyage-law-2")
+
+  /// Optional so Prisma Client can insert the row; `Unsupported` columns are
+  /// not writable through the generated client, so the vector itself is set by
+  /// a follow-up `$executeRaw` UPDATE. Reads also go through raw SQL.
+  embedding Unsupported("vector(1024)")?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Derived data: hard-deleted and rebuilt when its template changes, so no
+  // `deletedAt` here. Cascades with the parent template.
+  @@unique([templateId, chunkIndex])
+  @@index([templateId])
+  @@map("template_embeddings")
+}
+
+// ---------------------------------------------------------------------------
+// Generated output
+// ---------------------------------------------------------------------------
+
+model GeneratedDocument {
+  id         String            @id @default(cuid())
+  companyId  String
+  company    Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  templateId String?
+  template   DocumentTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  createdById String
+  createdBy   User             @relation(fields: [createdById], references: [id])
+
+  title   String
+  /// Generated body as editor JSON, mirroring DocumentTemplate.content.
+  content Json?
+  status  GeneratedDocumentStatus @default(DRAFT)
+
+  /// Inputs supplied to the generation run, retained for reproducibility.
+  promptVariables Json?
+  aiSummary       String?
+  failureReason   String?
+  generatedAt     DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([companyId, status, createdAt])
+  @@index([companyId, deletedAt])
+  @@index([createdById, createdAt])
+  @@index([templateId])
+  @@map("generated_documents")
+}
+
+// ---------------------------------------------------------------------------
+// Billing
+// ---------------------------------------------------------------------------
+
+model Subscription {
+  id        String  @id @default(cuid())
+  companyId String  @unique
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  plan   SubscriptionPlan   @default(STARTER)
+  status SubscriptionStatus @default(TRIALING)
+
+  providerCustomerId     String? @unique
+  providerSubscriptionId String? @unique
+
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  trialEndsAt        DateTime?
+  cancelAtPeriodEnd  Boolean   @default(false)
+  canceledAt         DateTime?
+
+  transactions PaymentTransaction[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([status, currentPeriodEnd])
+  @@index([plan, status])
+  @@map("subscriptions")
+}
+
+/// Immutable financial ledger. Corrections are recorded as new rows (e.g. a
+/// REFUNDED entry), never by mutating or soft-deleting history — retaining an
+/// unbroken record is a prerequisite for financial audit.
+model PaymentTransaction {
+  id             String        @id @default(cuid())
+  companyId      String
+  company        Company       @relation(fields: [companyId], references: [id])
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  /// Minor units (cents) to avoid floating-point drift.
+  amountCents Int
+  currency    String        @default("usd")
+  status      PaymentStatus @default(PENDING)
+
+  providerTransactionId String? @unique
+  providerInvoiceId     String?
+  description           String?
+  failureReason         String?
+  processedAt           DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([companyId, createdAt])
+  @@index([subscriptionId, status])
+  @@index([status, processedAt])
+  @@map("payment_transactions")
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+/// Append-only audit trail. No `deletedAt` and no `updatedAt` by design: an
+/// audit record that can be edited or hidden is not an audit record. Retention
+/// is enforced by time-based pruning, not by application-level deletes.
+model AuditLog {
+  id        String   @id @default(cuid())
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  action     AuditAction
+  entityType String
+  entityId   String?
+  /// Before/after diff or request context; shape varies by action.
+  metadata   Json?
+  ipAddress  String?
+  userAgent  String?
+
+  createdAt DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([userId, createdAt])
+  @@index([entityType, entityId])
+  @@index([action, createdAt])
+  @@map("audit_logs")
 }

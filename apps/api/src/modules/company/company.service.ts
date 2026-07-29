@@ -5,11 +5,17 @@ import { PrismaService } from '../../prisma/prisma.service';
 export class CompanyService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /** Soft-deleted companies are excluded from every read path. */
   findAll() {
-    return this.prisma.client.organization.findMany();
+    return this.prisma.client.company.findMany({
+      where: { deletedAt: null },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   findOne(id: string) {
-    return this.prisma.client.organization.findUnique({ where: { id } });
+    return this.prisma.client.company.findFirst({
+      where: { id, deletedAt: null },
+    });
   }
 }
