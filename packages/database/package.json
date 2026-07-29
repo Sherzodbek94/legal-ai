@@ -1,0 +1,25 @@
+{
+  "name": "@legaltech/database",
+  "version": "0.0.1",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "prisma generate && tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:studio": "prisma studio",
+    "lint": "echo \"@legaltech/database: no lint configured\"",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.19.1"
+  },
+  "devDependencies": {
+    "prisma": "^5.19.1",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.5.4"
+  }
+}

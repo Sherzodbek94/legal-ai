@@ -1,0 +1,75 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  ATTORNEY
+  PARALEGAL
+  CLIENT
+}
+
+enum MatterStatus {
+  OPEN
+  IN_REVIEW
+  CLOSED
+  ARCHIVED
+}
+
+enum DocumentStatus {
+  UPLOADED
+  PROCESSING
+  ANALYZED
+  FAILED
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  users     User[]
+  matters   Matter[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model User {
+  id             String       @id @default(cuid())
+  email          String       @unique
+  name           String?
+  role           UserRole     @default(ATTORNEY)
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  organizationId String
+  matters        Matter[]     @relation("MatterAssignees")
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+model Matter {
+  id             String       @id @default(cuid())
+  title          String
+  clientName     String
+  status         MatterStatus @default(OPEN)
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  organizationId String
+  assignees      User[]       @relation("MatterAssignees")
+  documents      Document[]
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+model Document {
+  id        String         @id @default(cuid())
+  fileName  String
+  fileUrl   String
+  status    DocumentStatus @default(UPLOADED)
+  aiSummary String?
+  matter    Matter         @relation(fields: [matterId], references: [id])
+  matterId  String
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
