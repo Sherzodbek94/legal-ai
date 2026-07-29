@@ -1,0 +1,45 @@
+# Rendered via `envsubst` (or the nginx:*-alpine docker-entrypoint templating
+# convention) before being placed at /etc/nginx/conf.d/api.conf.
+#
+# Required environment variables:
+#   SERVER_NAME, WEB_UPSTREAM_HOST, WEB_UPSTREAM_PORT,
+#   API_UPSTREAM_HOST, API_UPSTREAM_PORT
+
+upstream web_upstream {
+  server ${WEB_UPSTREAM_HOST}:${WEB_UPSTREAM_PORT};
+}
+
+upstream api_upstream {
+  server ${API_UPSTREAM_HOST}:${API_UPSTREAM_PORT};
+}
+
+server {
+  listen 80;
+  server_name ${SERVER_NAME};
+
+  add_header X-Frame-Options "SAMEORIGIN" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+  location /api/ {
+    limit_req zone=api_limit burst=20 nodelay;
+
+    proxy_pass http://api_upstream/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+
+  location / {
+    proxy_pass http://web_upstream;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }
+}

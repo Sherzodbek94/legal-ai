@@ -1,0 +1,25 @@
+# Service selectors target Deployments (app.kubernetes.io/name: legaltech-api /
+# legaltech-web) that are not yet defined — added once the apps are containerized.
+apiVersion: v1
+kind: Service
+metadata:
+  name: legaltech-api
+  namespace: legaltech
+spec:
+  selector:
+    app.kubernetes.io/name: legaltech-api
+  ports:
+    - port: 4000
+      targetPort: 4000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: legaltech-web
+  namespace: legaltech
+spec:
+  selector:
+    app.kubernetes.io/name: legaltech-web
+  ports:
+    - port: 3000
+      targetPort: 3000
