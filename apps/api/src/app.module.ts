@@ -8,7 +8,11 @@ import { AppService } from './app.service';
 import { winstonConfig } from './common/logger/winston.config';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { PrismaModule } from './prisma/prisma.module';
+import { RedisModule } from './redis/redis.module';
+import { StorageModule } from './storage/storage.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
+import { RolesGuard } from './modules/auth/guards/roles.guard';
 import { CompanyModule } from './modules/company/company.module';
 import { DocumentModule } from './modules/document/document.module';
 import { AiModule } from './modules/ai/ai.module';
@@ -33,6 +37,8 @@ import { NotificationModule } from './modules/notification/notification.module';
       ],
     }),
     PrismaModule,
+    RedisModule,
+    StorageModule,
     AuthModule,
     CompanyModule,
     DocumentModule,
@@ -43,9 +49,20 @@ import { NotificationModule } from './modules/notification/notification.module';
   controllers: [AppController],
   providers: [
     AppService,
+    // Guard order is registration order: shed abusive load first, then
+    // authenticate, then authorize. Authentication is deny-by-default —
+    // routes must opt out with @Public().
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: JwtAuthGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: RolesGuard,
     },
     {
       provide: APP_FILTER,

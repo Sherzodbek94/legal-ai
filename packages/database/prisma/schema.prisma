@@ -146,19 +146,90 @@ model Company {
   slug    String  @unique
   website String?
 
+  /// Full registered legal name, as it must appear on contracts.
+  legalName String?
+
+  // --- Uzbekistan registry identifiers -------------------------------------
+  /// STIR / ИНН — taxpayer identification number, 9 digits.
+  stir String? @unique
+  /// OKED / ОКЭД — primary economic activity classifier, 5 digits.
+  oked String?
+  /// MFO — servicing bank branch code, 5 digits.
+  mfo         String?
+  /// Settlement account, 20 digits.
+  bankAccount String?
+  bankName    String?
+  /// VAT registration certificate number, when the company is VAT-registered.
+  vatCode     String?
+
+  // --- Contact and representation -----------------------------------------
+  legalAddress      String?
+  actualAddress     String?
+  phone             String?
+  email             String?
+  directorName      String?
+  directorPosition  String?
+  accountantName    String?
+
   members             CompanyMember[]
   templates           DocumentTemplate[]
   generatedDocuments  GeneratedDocument[]
   subscription        Subscription?
   paymentTransactions PaymentTransaction[]
   auditLogs           AuditLog[]
+  assets              CompanyAsset[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
   @@index([deletedAt])
+  @@index([stir])
   @@map("companies")
+}
+
+enum CompanyAssetType {
+  SEAL
+  SIGNATURE
+  LETTERHEAD
+  LOGO
+}
+
+/// Binary artefacts belonging to a company.
+///
+/// SEAL and SIGNATURE images are forgery-grade material: possession of a clean
+/// scan is enough to fabricate a sealed document. Only the object key is stored
+/// here — the bytes live in a private bucket and are served exclusively through
+/// short-lived presigned URLs, never a public path.
+model CompanyAsset {
+  id        String           @id @default(cuid())
+  companyId String
+  company   Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  type      CompanyAssetType
+
+  /// Object key within the private bucket. Randomised, never derived from the
+  /// uploaded filename.
+  storageKey  String @unique
+  contentType String
+  sizeBytes   Int
+  /// SHA-256 of the stored bytes, for integrity checks and duplicate detection.
+  checksum    String
+  /// Original filename, retained for display only — never used to build keys.
+  originalName String?
+
+  uploadedById String?
+  uploadedAt   DateTime @default(now())
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // One active asset of each type per company; superseded uploads are
+  // soft-deleted, so this is enforced in application code rather than by a
+  // constraint that would collide with retained history.
+  @@index([companyId, type, deletedAt])
+  @@index([checksum])
+  @@map("company_assets")
 }
 
 model CompanyMember {

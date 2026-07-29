@@ -25,6 +25,9 @@ CREATE TYPE "PaymentStatus" AS ENUM ('PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED
 -- CreateEnum
 CREATE TYPE "AuditAction" AS ENUM ('CREATE', 'UPDATE', 'DELETE', 'LOGIN', 'LOGOUT', 'EXPORT', 'SHARE', 'GENERATE');
 
+-- CreateEnum
+CREATE TYPE "CompanyAssetType" AS ENUM ('SEAL', 'SIGNATURE', 'LETTERHEAD', 'LOGO');
+
 -- CreateTable
 CREATE TABLE "users" (
     "id" TEXT NOT NULL,
@@ -61,11 +64,44 @@ CREATE TABLE "companies" (
     "name" TEXT NOT NULL,
     "slug" TEXT NOT NULL,
     "website" TEXT,
+    "legalName" TEXT,
+    "stir" TEXT,
+    "oked" TEXT,
+    "mfo" TEXT,
+    "bankAccount" TEXT,
+    "bankName" TEXT,
+    "vatCode" TEXT,
+    "legalAddress" TEXT,
+    "actualAddress" TEXT,
+    "phone" TEXT,
+    "email" TEXT,
+    "directorName" TEXT,
+    "directorPosition" TEXT,
+    "accountantName" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
     "deletedAt" TIMESTAMP(3),
 
     CONSTRAINT "companies_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "company_assets" (
+    "id" TEXT NOT NULL,
+    "companyId" TEXT NOT NULL,
+    "type" "CompanyAssetType" NOT NULL,
+    "storageKey" TEXT NOT NULL,
+    "contentType" TEXT NOT NULL,
+    "sizeBytes" INTEGER NOT NULL,
+    "checksum" TEXT NOT NULL,
+    "originalName" TEXT,
+    "uploadedById" TEXT,
+    "uploadedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "deletedAt" TIMESTAMP(3),
+
+    CONSTRAINT "company_assets_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -212,7 +248,22 @@ CREATE INDEX "refresh_tokens_expiresAt_idx" ON "refresh_tokens"("expiresAt");
 CREATE UNIQUE INDEX "companies_slug_key" ON "companies"("slug");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "companies_stir_key" ON "companies"("stir");
+
+-- CreateIndex
 CREATE INDEX "companies_deletedAt_idx" ON "companies"("deletedAt");
+
+-- CreateIndex
+CREATE INDEX "companies_stir_idx" ON "companies"("stir");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "company_assets_storageKey_key" ON "company_assets"("storageKey");
+
+-- CreateIndex
+CREATE INDEX "company_assets_companyId_type_deletedAt_idx" ON "company_assets"("companyId", "type", "deletedAt");
+
+-- CreateIndex
+CREATE INDEX "company_assets_checksum_idx" ON "company_assets"("checksum");
 
 -- CreateIndex
 CREATE INDEX "company_members_companyId_role_deletedAt_idx" ON "company_members"("companyId", "role", "deletedAt");
@@ -291,6 +342,9 @@ CREATE INDEX "audit_logs_action_createdAt_idx" ON "audit_logs"("action", "create
 
 -- AddForeignKey
 ALTER TABLE "refresh_tokens" ADD CONSTRAINT "refresh_tokens_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "company_assets" ADD CONSTRAINT "company_assets_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "company_members" ADD CONSTRAINT "company_members_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE CASCADE ON UPDATE CASCADE;
