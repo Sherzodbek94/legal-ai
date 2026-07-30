@@ -12,11 +12,19 @@
     "baseUrl": "./",
     "incremental": true,
     "skipLibCheck": true,
-    "strictNullChecks": true,
-    "noImplicitAny": false,
-    "strictBindCallApply": false,
+    // Full strict mode. The Nest starter ships with noImplicitAny and
+    // strictBindCallApply disabled, which quietly allows implicit `any` to
+    // spread through a codebase — every one of which is a type check that never
+    // runs.
+    "strict": true,
     "forceConsistentCasingInFileNames": true,
-    "noFallthroughCasesInSwitch": false,
+    // A fallthrough is almost always a missing `break` rather than an intended
+    // one, and the intended case is cheap to write explicitly.
+    "noFallthroughCasesInSwitch": true,
+    // Catches a `.length` or `[0]` on a possibly-absent element. Left OFF: it
+    // requires a non-null assertion on nearly every array index, and blanket
+    // `!` assertions are a worse outcome than the checks it would add.
+    "noUncheckedIndexedAccess": false,
     "esModuleInterop": true,
     "moduleResolution": "node"
   }

@@ -1,0 +1,343 @@
+# =============================================================================
+# Test → build → deploy
+#
+# Three gates in order. Images are only built from a commit whose tests passed,
+# and only deployed from an image that built — so a red test cannot reach the
+# cluster even if someone re-runs a later job.
+# =============================================================================
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Manual runs, for redeploying a known-good commit without pushing to it.
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        default: staging
+        type: choice
+        options: [staging, production]
+
+concurrency:
+  # One run per branch. A second push while a deploy is in flight cancels the
+  # earlier one rather than racing it — two concurrent `kubectl apply`s against
+  # one Deployment produce an undefined final image.
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_API: ${{ github.repository }}-api
+  IMAGE_WEB: ${{ github.repository }}-web
+  NODE_VERSION: '22'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Test
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      # Real Postgres and Redis rather than mocks. The pgvector image is required:
+      # the schema declares a `vector` extension and migrations fail without it,
+      # which is precisely the failure worth catching here rather than at deploy.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: legaltech_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/legaltech_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      # Long enough to satisfy the minimum-length checks in TokenService and
+      # VerificationTokenService. Test-only values; nothing here is a real secret.
+      JWT_ACCESS_SECRET: test-jwt-secret-that-is-long-enough-for-validation
+      DOCUMENT_VERIFICATION_SECRET: test-document-verification-secret-long-enough
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # Puppeteer's Chromium is not needed for unit tests and is the single
+      # slowest part of a cold install.
+      - name: Install dependencies
+        run: npm ci
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema packages/database/prisma/schema.prisma
+
+      # Applies every migration to a real database. This is the only place the
+      # hand-written SQL — the generated tsvector column, the HNSW indexes, the
+      # partial unique index on the global taxonomy — is actually executed, and a
+      # syntax error in any of it fails here rather than during a production
+      # deploy.
+      - name: Apply migrations
+        run: npx prisma migrate deploy --schema packages/database/prisma/schema.prisma
+
+      - name: Typecheck
+        run: npx tsc -p apps/api/tsconfig.json --noEmit
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # 2. Build and push images
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build images
+    runs-on: ubuntu-latest
+    needs: test
+    # Never publishes from a pull request: the image would carry unreviewed code
+    # under a tag someone could deploy.
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 45
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      api-image: ${{ steps.meta-api.outputs.tags }}
+      web-image: ${{ steps.meta-web.outputs.tags }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # Provided by Actions; no long-lived registry credential to rotate.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags: the commit SHA is the one that matters. `latest` is a convenience
+      # for humans, but deployments reference the SHA so a rollout is reproducible
+      # and a rollback is a matter of naming the previous one.
+      - name: Compute API tags
+        id: meta-api
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_API }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push API
+        uses: docker/build-push-action@v6
+        with:
+          # Root context: npm workspaces resolve through the root lockfile.
+          context: .
+          file: apps/api/Dockerfile
+          push: true
+          tags: ${{ steps.meta-api.outputs.tags }}
+          labels: ${{ steps.meta-api.outputs.labels }}
+          # Layer cache in the registry rather than in the runner. GitHub's
+          # runner cache is capped at 10GB per repository and this image's
+          # dependency layer alone is large enough to keep evicting itself.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_API }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_API }}:buildcache,mode=max
+
+      - name: Compute web tags
+        id: meta-web
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_WEB }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: true
+          tags: ${{ steps.meta-web.outputs.tags }}
+          labels: ${{ steps.meta-web.outputs.labels }}
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_WEB }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_WEB }}:buildcache,mode=max
+
+  # ---------------------------------------------------------------------------
+  # 3. Deploy
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 20
+
+    # Bind to a GitHub Environment so KUBE_CONFIG is scoped to it and a
+    # production deploy can require a manual approval without changing this file.
+    environment:
+      name: ${{ github.event.inputs.environment || 'production' }}
+      url: https://app.legaltech.example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Verify cluster access
+        run: kubectl cluster-info && kubectl get nodes
+
+      # Applied before the workloads so a Deployment never references a
+      # ConfigMap or PVC that does not exist yet.
+      #
+      # `secrets.example.yaml` is NOT applied and must never be: it is an empty
+      # template, and applying it would blank every real value in the cluster.
+      # It is a separate file rather than a document inside config.yaml precisely
+      # so that skipping it is structural rather than a label selector someone
+      # can get wrong.
+      - name: Apply configuration
+        run: |
+          set -euo pipefail
+          kubectl apply -f infra/k8s/namespace.yaml
+          kubectl apply -f infra/k8s/cert-manager.yaml
+          kubectl apply -f infra/k8s/config.yaml
+          kubectl apply -f infra/k8s/services.yaml
+
+      # Image tags and the config checksum are substituted into the manifests
+      # before a single apply, rather than applied and then patched.
+      #
+      # The obvious sequence — `kubectl apply` followed by `kubectl set image` —
+      # produces TWO rollouts: the apply installs the manifest's `latest` tag and
+      # starts rolling it out, then `set image` starts a second rollout to the
+      # real SHA. That doubles deploy time and puts an unintended revision into
+      # the rollout history, which is what a rollback would land on.
+      - name: Roll out
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          API_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_API }}:${SHA}"
+          WEB_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_WEB }}:${SHA}"
+
+          # Rolls the API pods when non-secret configuration changes. Editing a
+          # ConfigMap does not restart anything on its own, so without this a
+          # config change appears to deploy and silently does not take effect
+          # until the next unrelated rollout.
+          CONFIG_HASH="$(sha256sum infra/k8s/config.yaml | cut -c1-16)"
+          echo "Config checksum: ${CONFIG_HASH}"
+
+          # The init container runs the same image as the app container, so both
+          # are rewritten — otherwise migrations would run from `latest` while the
+          # application runs from this commit.
+          sed -e "s#ghcr.io/OWNER/legaltech-api:latest#${API_IMAGE}#g" \
+              -e "s#REPLACED_BY_CI#${CONFIG_HASH}#g" \
+              infra/k8s/api-deployment.yaml \
+            | kubectl apply -f -
+
+          sed -e "s#ghcr.io/OWNER/legaltech-web:latest#${WEB_IMAGE}#g" \
+              infra/k8s/web-deployment.yaml \
+            | kubectl apply -f -
+
+          kubectl apply -f infra/k8s/hpa.yaml
+          kubectl apply -f infra/k8s/ingress.yaml
+
+      # `rollout status` blocks until every new pod is Ready, and fails on
+      # timeout. That is what makes this a gate rather than a fire-and-forget:
+      # without it the job goes green the instant the API server accepts the
+      # spec, whether or not a single pod ever started.
+      - name: Wait for the API rollout
+        run: kubectl -n legaltech rollout status deployment/legaltech-api --timeout=10m
+
+      - name: Wait for the web rollout
+        run: kubectl -n legaltech rollout status deployment/legaltech-web --timeout=5m
+
+      - name: Verify health
+        run: |
+          set -euo pipefail
+          # Checked from inside the cluster, so it tests the Service and the pods
+          # rather than DNS and the ingress — which have their own failure modes
+          # and would make this step ambiguous.
+          #
+          # `/health/ready` rather than `/health/live`: liveness deliberately does
+          # not check Postgres or Redis, so it would pass on a pod that cannot
+          # reach either — which is exactly the deploy worth failing.
+          #
+          # Unprefixed: probe paths are excluded from the global `api` prefix.
+          kubectl -n legaltech run healthcheck-${{ github.run_id }} \
+            --rm -i --restart=Never \
+            --image=curlimages/curl:8.11.1 \
+            --command -- curl -fsS --max-time 10 \
+              http://legaltech-api:4000/health/ready
+
+      # Confirms the scrape endpoint is serving before Prometheus is pointed at
+      # it. A metrics endpoint that 404s produces no alert — it produces silence,
+      # which reads identically to a healthy system.
+      - name: Verify metrics endpoint
+        run: |
+          set -euo pipefail
+          kubectl -n legaltech run metricscheck-${{ github.run_id }} \
+            --rm -i --restart=Never \
+            --image=curlimages/curl:8.11.1 \
+            --command -- sh -c \
+              "curl -fsS --max-time 10 http://legaltech-api:4000/metrics | head -20"
+
+      # Only on failure, and only for the deployment that failed. `rollout undo`
+      # restores the previous ReplicaSet, which is why revisionHistoryLimit is
+      # set above — with a history of 0 there is nothing to roll back to.
+      #
+      # NOTE: this does not roll back the database. A migration that applied
+      # successfully stays applied, so the previous image runs against the new
+      # schema. That is safe for additive migrations and is not safe for
+      # destructive ones, which is the reason destructive changes need to be split
+      # across two releases.
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          kubectl -n legaltech rollout undo deployment/legaltech-api || true
+          kubectl -n legaltech rollout undo deployment/legaltech-web || true
+          kubectl -n legaltech rollout status deployment/legaltech-api --timeout=5m || true
+
+      - name: Report
+        if: always()
+        run: |
+          echo "### Deployment summary" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          kubectl -n legaltech get deploy,hpa,pods -o wide >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

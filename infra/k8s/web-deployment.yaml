@@ -1,0 +1,135 @@
+# =============================================================================
+# legaltech-web
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legaltech-web
+  namespace: legaltech
+  labels:
+    app.kubernetes.io/name: legaltech-web
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: legaltech
+spec:
+  # Owned by the HPA — see the note in api-deployment.yaml.
+  revisionHistoryLimit: 5
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: legaltech-web
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: legaltech-web
+        app.kubernetes.io/component: frontend
+    spec:
+      # Much shorter than the API's. The web tier serves rendered pages in
+      # milliseconds; there is no long-running work to drain, only the preStop
+      # window for endpoint propagation.
+      terminationGracePeriodSeconds: 30
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: legaltech-web
+
+      containers:
+        - name: web
+          # Placeholder, rewritten to a commit-pinned tag by the deploy workflow.
+          image: ghcr.io/OWNER/legaltech-web:latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 3000
+
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+            # NOTE: NEXT_PUBLIC_API_URL is NOT set here and setting it would have
+            # no effect. Next inlines NEXT_PUBLIC_* into the client bundle at
+            # build time, so it is a build argument (see the Dockerfile and the CI
+            # workflow) and the image is environment-specific as a result.
+
+          resources:
+            # Modest: Next's standalone server is mostly I/O-bound once the page
+            # cache is warm. Server components fetching from the API dominate its
+            # latency, not its own CPU.
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              memory: 768Mi
+
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 3
+            failureThreshold: 20
+            timeoutSeconds: 3
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 1
+
+          lifecycle:
+            preStop:
+              exec:
+                # Endpoint-propagation window; see api-deployment.yaml.
+                command: ["/bin/sh", "-c", "sleep 10"]
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            # Next writes its image-optimisation cache under .next/cache at
+            # runtime. With a read-only root filesystem that write fails, and the
+            # failure surfaces as broken images rather than as an error — so the
+            # one path it needs is mounted writable and nothing else is.
+            - name: next-cache
+              mountPath: /app/apps/web/.next/cache
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: next-cache
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

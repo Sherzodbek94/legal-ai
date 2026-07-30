@@ -1,0 +1,162 @@
+# =============================================================================
+# Prometheus Operator resources.
+#
+# PREREQUISITE: these require the Prometheus Operator's CRDs (ServiceMonitor,
+# PrometheusRule). `kubectl apply` fails with "no matches for kind" if it is not
+# installed, which is why the deploy workflow does not apply this file — it is
+# applied deliberately, once, on a cluster that has the operator.
+#
+# If Prometheus was deployed WITHOUT the operator, use the `prometheus.io/*`
+# annotations on the Deployment instead and ignore this file. Both mechanisms are
+# provided because which one works depends entirely on how Prometheus was
+# installed, and that is not knowable from here.
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: legaltech-api
+  namespace: legaltech
+  labels:
+    app.kubernetes.io/name: legaltech-api
+    app.kubernetes.io/part-of: legaltech
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: legaltech-api
+  endpoints:
+    - port: http
+      path: /metrics
+      # 15s matches the default. Faster costs storage for no benefit on metrics
+      # whose alerting windows are measured in minutes.
+      interval: 15s
+      # Shorter than the interval, so a slow scrape cannot overlap the next one.
+      scrapeTimeout: 10s
+---
+# =============================================================================
+# Alerting rules.
+#
+# Deliberately few. Every alert here is one a human should act on immediately;
+# anything that is merely interesting belongs on a dashboard. An alert nobody
+# acts on trains people to ignore the ones that matter.
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: legaltech-api
+  namespace: legaltech
+  labels:
+    app.kubernetes.io/name: legaltech-api
+    app.kubernetes.io/part-of: legaltech
+spec:
+  groups:
+    - name: legaltech-api.availability
+      rules:
+        # Pods are unready for a whole minute. Brief unreadiness during a deploy
+        # is normal and expected — `for: 2m` is what distinguishes a rollout from
+        # a dependency outage.
+        - alert: LegalTechApiPodsUnready
+          expr: |
+            min by (namespace) (app_ready{job="legaltech-api"}) == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "API pods reporting unready for 2 minutes"
+            description: >-
+              At least one legaltech-api pod has failed readiness continuously.
+              Check `app_dependency_up` to see whether Postgres or Redis is the
+              cause.
+
+        - alert: LegalTechDependencyDown
+          expr: |
+            app_dependency_up{job="legaltech-api"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.dependency }} unreachable from the API"
+            description: >-
+              Readiness checks against {{ $labels.dependency }} have failed for a
+              minute. Pods will have drained out of the Service.
+
+        # Every replica gone. Distinct from the unready alert because the cause
+        # and the response are different — this is a scheduling or image problem,
+        # not a dependency one.
+        - alert: LegalTechApiNoPods
+          expr: |
+            absent(up{job="legaltech-api"} == 1)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No legaltech-api pods are being scraped"
+
+    - name: legaltech-api.latency
+      rules:
+        # 5% of requests failing. Errors are counted as a RATIO rather than a
+        # count: an absolute threshold fires constantly at high traffic and never
+        # at low traffic, which is exactly backwards.
+        - alert: LegalTechApiHighErrorRate
+          expr: |
+            sum(rate(http_requests_total{job="legaltech-api",status=~"5.."}[5m]))
+              /
+            sum(rate(http_requests_total{job="legaltech-api"}[5m]))
+              > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Over 5% of API requests are returning 5xx"
+
+        # p95 excluding the deliberately slow endpoints. Document export and OCR
+        # legitimately take tens of seconds, and including them makes the p95
+        # meaningless — it would measure how many PDFs were requested, not
+        # whether the API is healthy.
+        - alert: LegalTechApiHighLatency
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (
+                rate(http_request_duration_seconds_bucket{
+                  job="legaltech-api",
+                  route!~".*(export|search|generate).*"
+                }[5m])
+              )
+            ) > 2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "API p95 latency above 2s (excluding export, search, and generation)"
+
+        # Event-loop lag is the leading indicator for this service specifically:
+        # Tesseract's WASM recognition is synchronous and blocks the loop, so lag
+        # rises before anything times out.
+        - alert: LegalTechApiEventLoopBlocked
+          expr: |
+            legaltech_nodejs_eventloop_lag_p99_seconds{job="legaltech-api"} > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node event loop blocked for over 1s at p99"
+            description: >-
+              Usually synchronous OCR work. Consider lowering OCR_MAX_CONCURRENT
+              or moving recognition to a dedicated worker deployment.
+
+    - name: legaltech-api.saturation
+      rules:
+        - alert: LegalTechApiHeapNearLimit
+          expr: |
+            legaltech_nodejs_heap_size_used_bytes{job="legaltech-api"}
+              /
+            legaltech_nodejs_heap_size_total_bytes{job="legaltech-api"}
+              > 0.9
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node heap over 90% utilised"
+            description: >-
+              Liveness fails at 1.5GB and the container limit is 2Gi. Sustained
+              pressure here precedes an OOMKill.

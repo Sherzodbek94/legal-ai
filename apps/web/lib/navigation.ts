@@ -6,6 +6,7 @@ import {
   LayoutDashboard,
   Scale,
   Settings,
+  ShieldAlert,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -18,6 +19,8 @@ export interface NavItem {
 export interface NavSection {
   label: string;
   items: NavItem[];
+  /** Sections only platform staff should see listed. */
+  superAdminOnly?: boolean;
 }
 
 export const navSections: NavSection[] = [
@@ -40,6 +43,18 @@ export const navSections: NavSection[] = [
       { title: 'Billing', href: '/billing', icon: CreditCard },
       { title: 'Settings', href: '/settings', icon: Settings },
     ],
+  },
+  {
+    label: 'Platform',
+    /**
+     * Visible only to platform staff.
+     *
+     * Hiding the link is presentation, not access control — every /admin route
+     * requires SUPER_ADMIN at the API, so a user who types the URL gets panels
+     * reporting 403 rather than data.
+     */
+    superAdminOnly: true,
+    items: [{ title: 'Administration', href: '/admin', icon: ShieldAlert }],
   },
 ];
 

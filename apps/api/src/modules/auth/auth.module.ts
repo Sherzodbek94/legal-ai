@@ -43,6 +43,9 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
     JwtAuthGuard,
     RolesGuard,
   ],
-  exports: [AuthService, TokenService, JwtAuthGuard, RolesGuard],
+  // JwtModule is re-exported so AdminModule can sign impersonation tokens with
+  // the same configured secret, issuer, and audience rather than assembling its
+  // own signer that could drift from this one.
+  exports: [AuthService, TokenService, JwtAuthGuard, RolesGuard, JwtModule],
 })
 export class AuthModule {}

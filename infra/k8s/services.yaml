@@ -1,25 +1,45 @@
-# Service selectors target Deployments (app.kubernetes.io/name: legaltech-api /
-# legaltech-web) that are not yet defined — added once the apps are containerized.
+# =============================================================================
+# Services
+#
+# Ports are named so the Ingress can reference them by name. A numeric reference
+# breaks silently if a container port is ever changed; a name does not.
+# =============================================================================
 apiVersion: v1
 kind: Service
 metadata:
   name: legaltech-api
   namespace: legaltech
+  labels:
+    app.kubernetes.io/name: legaltech-api
+    app.kubernetes.io/part-of: legaltech
 spec:
+  type: ClusterIP
   selector:
     app.kubernetes.io/name: legaltech-api
   ports:
-    - port: 4000
-      targetPort: 4000
+    - name: http
+      port: 4000
+      targetPort: http
+      protocol: TCP
+  # Only Ready pods receive traffic. This is the default and is stated explicitly
+  # because setting it to true — which some guides suggest for faster startup —
+  # would route requests to pods that have not finished connecting to Postgres.
+  publishNotReadyAddresses: false
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: legaltech-web
   namespace: legaltech
+  labels:
+    app.kubernetes.io/name: legaltech-web
+    app.kubernetes.io/part-of: legaltech
 spec:
+  type: ClusterIP
   selector:
     app.kubernetes.io/name: legaltech-web
   ports:
-    - port: 3000
-      targetPort: 3000
+    - name: http
+      port: 3000
+      targetPort: http
+      protocol: TCP

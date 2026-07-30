@@ -1,0 +1,129 @@
+# =============================================================================
+# Non-secret configuration, PodDisruptionBudgets, and the OCR cache volume.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: legaltech-config
+  namespace: legaltech
+data:
+  NODE_ENV: "production"
+  PORT: "4000"
+  LOG_LEVEL: "info"
+
+  # Credentialed CORS cannot use "*" — the browser refuses it when cookies are in
+  # play. This must list the exact origin the web app is served from.
+  CORS_ORIGINS: "https://app.legaltech.example.com"
+
+  JWT_ISSUER: "legaltech-api"
+  JWT_AUDIENCE: "legaltech-web"
+  ACCESS_TOKEN_TTL: "15m"
+  REFRESH_TOKEN_TTL_DAYS: "7"
+
+  THROTTLE_TTL: "60000"
+  THROTTLE_LIMIT: "100"
+
+  # --- Shutdown --------------------------------------------------------------
+  # How long the pod reports unready before it stops accepting work. Matches the
+  # preStop sleep and must stay well under terminationGracePeriodSeconds (90),
+  # which is a hard kill.
+  SHUTDOWN_DRAIN_SECONDS: "15"
+
+  # --- Billing ---------------------------------------------------------------
+  BILLING_GRACE_PERIOD_DAYS: "7"
+  BILLING_MAX_RENEWAL_ATTEMPTS: "4"
+  BILLING_RENEWAL_BATCH_SIZE: "200"
+  BILLING_USAGE_RETENTION_DAYS: "90"
+
+  # --- Documents -------------------------------------------------------------
+  DOCUMENT_VERIFICATION_BASE_URL: "https://app.legaltech.example.com/verify"
+  DOCUMENT_VERIFICATION_MAX_AGE_SECONDS: "0"
+  # Two concurrent Chromium pages per pod. Raising this without also raising the
+  # memory limit is how a pod gets OOMKilled mid-export; the HPA adds pods
+  # instead.
+  PDF_MAX_CONCURRENT_PAGES: "2"
+  PDF_RENDER_TIMEOUT_MS: "30000"
+  PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium-browser"
+  PUPPETEER_NO_SANDBOX: "false"
+
+  # --- OCR -------------------------------------------------------------------
+  OPENAI_EMBEDDING_MODEL: "text-embedding-3-small"
+  # Deliberately low. Each Tesseract worker holds several hundred megabytes of
+  # WASM heap, and the pod memory limit is 2Gi shared with Chromium.
+  OCR_MAX_CONCURRENT: "1"
+  OCR_BATCH_SIZE: "2"
+  OCR_MAX_ATTEMPTS: "3"
+  OCR_CACHE_PATH: "/var/cache/tesseract"
+
+  # --- AI --------------------------------------------------------------------
+  AI_PRIMARY_PROVIDER: "anthropic"
+  AI_MAX_TOKENS: "8192"
+  ANTHROPIC_MODEL: "claude-sonnet-5"
+  ANTHROPIC_EFFORT: "medium"
+  OPENAI_MODEL: "gpt-4o"
+
+  # --- Notifications ---------------------------------------------------------
+  ESKIZ_BASE_URL: "https://notify.eskiz.uz/api"
+  EMAIL_FROM: "LegalTech <no-reply@legaltech.example.com>"
+
+  # --- Payments --------------------------------------------------------------
+  PAYMENT_ORDER_TTL_MS: "21600000"
+  PAYME_ACCOUNT_FIELD: "order_id"
+---
+# =============================================================================
+# Shared cache for Tesseract language models.
+#
+# ReadWriteMany because several API pods mount it at once. On clusters without an
+# RWX StorageClass — most managed Kubernetes with block storage only — this PVC
+# will not bind. The alternatives, in order of preference:
+#
+#   1. Bake the traineddata into the image at build time. Largest image, zero
+#      runtime cost, no volume needed. Best answer if the language set is fixed.
+#   2. Give each pod its own RWO volume via a StatefulSet.
+#   3. Replace with an emptyDir and accept that each pod downloads the models
+#      once on first use.
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: legaltech-tesseract-cache
+  namespace: legaltech
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      # Four language models plus room for more.
+      storage: 2Gi
+---
+# =============================================================================
+# PodDisruptionBudgets.
+#
+# `maxUnavailable: 0` on the Deployment only governs *rollouts*. Voluntary
+# disruptions — a node drain during a cluster upgrade, the autoscaler compacting
+# nodes — ignore it entirely and will happily evict every replica at once. The PDB
+# is the only thing that makes those operations respect availability.
+# =============================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: legaltech-api
+  namespace: legaltech
+spec:
+  # minAvailable rather than maxUnavailable: it stays correct as the HPA changes
+  # the replica count, where a percentage would round down to zero at low counts.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: legaltech-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: legaltech-web
+  namespace: legaltech
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: legaltech-web

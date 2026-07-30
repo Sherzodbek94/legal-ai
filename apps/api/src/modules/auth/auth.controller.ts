@@ -19,6 +19,7 @@ import { OneIdService } from './services/oneid.service';
 import { TokenService, type IssuedTokens } from './services/token.service';
 import { Public } from './decorators/public.decorator';
 import { Roles } from './decorators/roles.decorator';
+import { NoImpersonation } from '../admin/impersonation/no-impersonation.decorator';
 import { CurrentUser } from './decorators/current-user.decorator';
 import type { AuthenticatedUser } from './interfaces/jwt-payload.interface';
 import {
@@ -167,7 +168,13 @@ export class AuthController {
     this.clearAuthCookies(res);
   }
 
-  /** Revokes every session for the caller (e.g. "sign out everywhere"). */
+  /**
+   * Revokes every session for the caller (e.g. "sign out everywhere").
+   *
+   * Blocked during impersonation: signing a customer out of all their devices is
+   * both disruptive and indistinguishable, from their side, from a compromise.
+   */
+  @NoImpersonation('auth:credentials')
   @Post('logout-all')
   @HttpCode(HttpStatus.NO_CONTENT)
   async logoutAll(

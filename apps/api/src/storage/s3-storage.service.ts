@@ -79,6 +79,28 @@ export class S3StorageService {
   }
 
   /**
+   * Reads an object into memory.
+   *
+   * For embedding bytes into a rendered document — a seal or signature has to
+   * be inlined into the PDF/DOCX, and a presigned URL is no use there because
+   * the renderer is forbidden from reaching the network.
+   *
+   * Callers must bound what they read: this is only used for company assets,
+   * which are already capped by COMPANY_ASSET_MAX_BYTES on upload.
+   */
+  async getObjectBytes(key: string): Promise<Buffer> {
+    const response = await this.client.send(
+      new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+    );
+
+    if (!response.Body) {
+      throw new Error(`Object ${key} has no body`);
+    }
+
+    return Buffer.from(await response.Body.transformToByteArray());
+  }
+
+  /**
    * Time-limited read URL. The bucket itself stays private — there is no
    * public path to these objects.
    */

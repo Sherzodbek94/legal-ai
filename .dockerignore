@@ -1,0 +1,50 @@
+# Build context exclusions.
+#
+# Both Dockerfiles build from the repository root, so this file governs what is
+# sent to the daemon. Excluding node_modules is the single biggest win — the
+# installed tree here is well over a gigabyte with Puppeteer's Chromium and
+# Prisma's engines, and it is reinstalled inside the image regardless.
+
+node_modules
+**/node_modules
+
+# Build output. Regenerated in the image; copying it in risks a stale artifact
+# silently shipping instead of a fresh build.
+dist
+**/dist
+.next
+**/.next
+.turbo
+**/.turbo
+*.tsbuildinfo
+
+# Secrets. A .env in the build context becomes a layer in the image, and layers
+# are extractable from any registry the image is pushed to.
+.env
+.env.*
+!.env.example
+
+# Version control and CI
+.git
+.gitignore
+.github
+
+# Local tooling
+.vscode
+.idea
+.claude
+*.log
+npm-debug.log*
+
+# Tests and coverage — not part of a runtime image, and excluding them keeps a
+# source-file change from invalidating the dependency layer.
+coverage
+**/*.spec.ts
+**/__testing__
+
+# Documentation and infrastructure. Neither is needed to run the apps, and both
+# change often enough to keep busting the cache if included.
+docs
+infra
+README.md
+*.md

@@ -1,0 +1,269 @@
+# =============================================================================
+# legaltech-api
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legaltech-api
+  namespace: legaltech
+  labels:
+    app.kubernetes.io/name: legaltech-api
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: legaltech
+spec:
+  # Replica count is omitted deliberately: the HPA owns it. Setting it here means
+  # every `kubectl apply` resets the count to this number and then the HPA scales
+  # back up, which drops capacity during each deploy.
+  revisionHistoryLimit: 5
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # One new pod at a time, and never below the current replica count. With
+      # maxUnavailable > 0 a deploy sheds capacity before it has added any, which
+      # is exactly wrong during the traffic peak deploys usually happen near.
+      maxSurge: 1
+      maxUnavailable: 0
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: legaltech-api
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: legaltech-api
+        app.kubernetes.io/component: backend
+      annotations:
+        # Restarts pods when non-secret configuration changes. A ConfigMap edit
+        # alone does not roll the Deployment, so without this a config change
+        # appears to apply and silently does not take effect.
+        #
+        # Substituted by the deploy workflow with a hash of config.yaml. Applying
+        # this file by hand leaves the literal in place, which is harmless — the
+        # value never changes, so it simply never triggers a roll.
+        checksum/config: "REPLACED_BY_CI"
+
+        # Pod-level scrape discovery, for a Prometheus configured with the
+        # kubernetes_sd_configs pod role. Pods are scraped directly rather than
+        # through the Service: a Service-level scrape load-balances across
+        # replicas, so each poll lands on a different pod and every counter looks
+        # like it is jumping backwards.
+        #
+        # Redundant if the Prometheus Operator is installed — use the
+        # ServiceMonitor in monitoring.yaml instead. Both are provided because
+        # which one applies depends on how Prometheus was deployed.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Long enough for an in-flight PDF export or OCR pass to finish. The
+      # preStop sleep is counted inside this window, so it must exceed
+      # preStop + the longest expected request.
+      terminationGracePeriodSeconds: 90
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # Makes mounted volumes group-writable by the pod's group, which is what
+        # lets the non-root user write to the Tesseract cache.
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Spread across nodes. `ScheduleAnyway` rather than `DoNotSchedule`: on a
+      # small cluster a hard constraint leaves pods Pending during a deploy,
+      # which turns a resilience measure into an outage.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: legaltech-api
+
+      # -----------------------------------------------------------------------
+      # Migrations run once per deploy, before any application container starts.
+      #
+      # An init container rather than a Job: it is ordered against this exact
+      # image revision automatically, and a failed migration blocks the rollout
+      # instead of letting new code reach an un-migrated schema.
+      #
+      # This is safe with multiple replicas because `prisma migrate deploy` takes
+      # a Postgres advisory lock — concurrent init containers serialise rather
+      # than racing. It is NOT safe for destructive migrations during a rolling
+      # deploy: for the window between the migration and the last old pod
+      # terminating, old code runs against the new schema. Those need the
+      # expand/contract pattern across two releases.
+      # -----------------------------------------------------------------------
+      initContainers:
+        - name: migrate
+          # Placeholder. The deploy workflow rewrites this exact string to a
+          # commit-pinned tag before applying, so a rollout is reproducible and a
+          # rollback names a specific build rather than whatever `latest` points
+          # at now.
+          image: ghcr.io/OWNER/legaltech-api:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - npx
+            - prisma
+            - migrate
+            - deploy
+            - --schema
+            - packages/database/prisma/schema.prisma
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: legaltech-secrets
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      containers:
+        - name: api
+          # Tag is rewritten by CI to an immutable digest-pinned reference.
+          # Placeholder. The deploy workflow rewrites this exact string to a
+          # commit-pinned tag before applying, so a rollout is reproducible and a
+          # rollback names a specific build rather than whatever `latest` points
+          # at now.
+          image: ghcr.io/OWNER/legaltech-api:latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 4000
+
+          envFrom:
+            - configMapRef:
+                name: legaltech-config
+            - secretRef:
+                name: legaltech-secrets
+
+          env:
+            - name: NODE_ENV
+              value: production
+            # Chromium's sandbox needs kernel capabilities this pod drops. It is
+            # left ENABLED here, which means Chromium relies on the pod's own
+            # isolation; the alternative is granting SYS_ADMIN, which is a larger
+            # hole than the one it closes.
+            - name: PUPPETEER_NO_SANDBOX
+              value: "false"
+
+          resources:
+            # Requests are what the scheduler reserves; limits are the ceiling.
+            # Memory is generous because Chromium and Tesseract WASM both hold
+            # hundreds of megabytes while working, and an OOMKill here loses the
+            # in-flight export.
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              # No CPU limit. CFS throttling on a Node process produces latency
+              # spikes that look like application stalls, and the request already
+              # guarantees a floor. Memory IS limited, because a leak has to be
+              # bounded.
+              memory: 2Gi
+
+          # --- Probes ----------------------------------------------------------
+          #
+          # Three probes, three different questions. The split is the point.
+          #
+          # These paths are excluded from the global `api` prefix, so the kubelet
+          # reaches them directly on the pod without the ingress in between.
+          startupProbe:
+            # Readiness semantics, but with a long budget: the pod is not
+            # considered started until Postgres and Redis are reachable. While
+            # this is running, liveness and readiness are both suspended — which
+            # is what lets liveness be aggressive afterwards without killing a
+            # pod that is merely slow to connect.
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30 # up to 150s to come up
+            timeoutSeconds: 3
+
+          livenessProbe:
+            # "Is the process wedged?" — heap only, NOT the database.
+            #
+            # Failing this RESTARTS the pod. If it checked Postgres, a failover
+            # would fail liveness on every replica at once and restart all of
+            # them, converting a recoverable blip into an outage. Restarting a
+            # process cannot fix a database.
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            # "Can this pod serve right now?" — checks Postgres and Redis, and
+            # returns 503 the instant SIGTERM arrives so the pod drains out of the
+            # Service endpoints without being restarted.
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            # One failure removes the pod from the Service. Cheap and instantly
+            # reversible, unlike a restart — so there is no reason to tolerate
+            # even one bad check.
+            failureThreshold: 1
+
+          lifecycle:
+            preStop:
+              exec:
+                # Endpoint removal and SIGTERM are concurrent, not ordered:
+                # kube-proxy on every node has to observe the Endpoints change,
+                # and until it does, traffic keeps arriving at a pod that has
+                # already begun shutting down. Sleeping first absorbs that window
+                # so the connection draining that `enableShutdownHooks` performs
+                # has nothing new arriving into it.
+                #
+                # Paired with SHUTDOWN_DRAIN_SECONDS (15) in the ConfigMap. Both
+                # must stay well under terminationGracePeriodSeconds (90), which
+                # is a hard kill: preStop + drain + in-flight work all have to fit
+                # inside it.
+                command: ["/bin/sh", "-c", "sleep 15"]
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            # Chromium and tesseract.js both need writable scratch space, so the
+            # root filesystem stays writable rather than mounting emptyDirs over
+            # every path Chromium might touch. The container runs as an
+            # unprivileged user with all capabilities dropped.
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: tesseract-cache
+              mountPath: /var/cache/tesseract
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        # Language models are downloaded on first use, tens of megabytes at a
+        # time. A shared PVC means the first pod pays that cost once rather than
+        # every pod paying it on every restart.
+        - name: tesseract-cache
+          persistentVolumeClaim:
+            claimName: legaltech-tesseract-cache
+        - name: tmp
+          emptyDir:
+            sizeLimit: 2Gi

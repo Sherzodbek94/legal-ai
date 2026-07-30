@@ -11,6 +11,16 @@
 generator client {
   provider        = "prisma-client-js"
   previewFeatures = ["postgresqlExtensions"]
+
+  /// Query engines to download at `prisma generate`.
+  ///
+  /// `native` covers whatever the developer is on. The musl target is required
+  /// for the Alpine production image: Prisma ships a compiled query engine per
+  /// libc/OpenSSL combination, and a glibc engine simply will not load on Alpine.
+  /// Without this line the image builds successfully and then fails on its first
+  /// query with "Unable to require libquery_engine" — at runtime, in production,
+  /// long after the build went green.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -44,18 +54,75 @@ enum TemplateStatus {
   ARCHIVED
 }
 
+/// Top-level branch of the template taxonomy. Carried on every node so a query
+/// for "all HR orders" is a single indexed predicate rather than a recursive
+/// walk up to the root.
+enum TemplateCategoryKind {
+  CONTRACT
+  HR_ORDER
+  CORPORATE_ACT
+}
+
 enum GeneratedDocumentStatus {
   DRAFT
   GENERATING
   GENERATED
   FAILED
   FINALIZED
+  /// Submitted into the approval chain; awaiting a decision on some step.
+  PENDING_APPROVAL
+  /// A step was rejected. Terminal for the round, but the document returns to
+  /// DRAFT for correction and can be resubmitted.
+  REJECTED
+  /// Every step in the chain approved. Terminal.
+  COMPLETED
 }
 
+/// Outcome of one step in a document's approval chain.
+enum ApprovalStepStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  /// Superseded without a decision — e.g. the round was abandoned because an
+  /// earlier step rejected.
+  SKIPPED
+}
+
+/// Commercial tier. Limits themselves live in the plan catalogue in code
+/// (apps/api/src/modules/billing/plans), not here — repricing a plan must not
+/// require a migration.
 enum SubscriptionPlan {
-  STARTER
-  PROFESSIONAL
+  FREE
+  PRO
+  BUSINESS
   ENTERPRISE
+}
+
+/// A metered resource. Each is counted per company per billing period.
+enum UsageMetric {
+  /// Documents generated from a template, metered on generation not export.
+  DOCUMENTS_GENERATED
+  /// Calls to the AI engine, which carry a direct per-call vendor cost.
+  AI_GENERATIONS
+  /// Templates held in the catalogue. A stock, not a flow — see UsageService.
+  TEMPLATES
+  /// Active company members.
+  SEATS
+}
+
+enum CouponDiscountType {
+  PERCENTAGE
+  FIXED_AMOUNT
+}
+
+/// How long a redeemed coupon keeps applying.
+enum CouponDuration {
+  /// A single invoice.
+  ONCE
+  /// A fixed number of billing periods.
+  REPEATING
+  /// Every invoice for the life of the subscription.
+  FOREVER
 }
 
 enum SubscriptionStatus {
@@ -73,6 +140,41 @@ enum PaymentStatus {
   FAILED
   REFUNDED
   PARTIALLY_REFUNDED
+}
+
+/// Payment gateway an order or transaction belongs to.
+enum PaymentProvider {
+  CLICK
+  PAYME
+  UZUM
+  STRIPE
+  /// Recorded by an operator rather than a gateway (bank transfer, credit).
+  MANUAL
+}
+
+/// Lifecycle of the thing being paid for.
+enum PaymentOrderStatus {
+  PENDING
+  PAID
+  CANCELED
+  /// Passed its deadline without payment. Terminal — a new order is required.
+  EXPIRED
+}
+
+/// State of a transaction inside a gateway.
+///
+/// Mirrors Payme's integer states (1, 2, -1, -2), which is the strictest of the
+/// four protocols: it distinguishes a cancellation before money moved from a
+/// reversal after it did, and requires both to be reported back accurately.
+enum ProviderTransactionState {
+  /// Created and awaiting confirmation. Payme state 1.
+  CREATED
+  /// Money captured. Payme state 2.
+  PERFORMED
+  /// Cancelled before capture. Payme state -1.
+  CANCELED
+  /// Reversed after capture — a refund. Payme state -2.
+  REVERSED
 }
 
 enum AuditAction {
@@ -99,10 +201,30 @@ model User {
   emailVerified DateTime?
   lastLoginAt   DateTime?
 
+  // --- Administrative lock ---------------------------------------------------
+  /// Set while the account is suspended. A locked user is refused at token
+  /// validation, not merely at login, so an existing session stops working
+  /// immediately rather than at its next expiry.
+  lockedAt     DateTime?
+  lockedReason String?
+  /// Operator who applied the lock. Never cascades to null on their deletion —
+  /// see the SetNull note below; accountability outlives an employee.
+  lockedById   String?
+
   refreshTokens      RefreshToken[]
   memberships        CompanyMember[]
   generatedDocuments GeneratedDocument[]
   auditLogs          AuditLog[]
+  templateVersions   TemplateVersion[]
+  approvalDecisions  DocumentApproval[]
+  submittedDocuments GeneratedDocument[] @relation("DocumentSubmittedBy")
+  aiUsage            AiUsageRecord[]
+
+  impersonationsPerformed ImpersonationSession[] @relation("ImpersonationActor")
+  impersonationsReceived  ImpersonationSession[] @relation("ImpersonationTarget")
+
+  notifications          Notification[]
+  notificationPreference NotificationPreference?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -151,9 +273,9 @@ model Company {
 
   // --- Uzbekistan registry identifiers -------------------------------------
   /// STIR / ИНН — taxpayer identification number, 9 digits.
-  stir String? @unique
+  stir        String? @unique
   /// OKED / ОКЭД — primary economic activity classifier, 5 digits.
-  oked String?
+  oked        String?
   /// MFO — servicing bank branch code, 5 digits.
   mfo         String?
   /// Settlement account, 20 digits.
@@ -163,21 +285,37 @@ model Company {
   vatCode     String?
 
   // --- Contact and representation -----------------------------------------
-  legalAddress      String?
-  actualAddress     String?
-  phone             String?
-  email             String?
-  directorName      String?
-  directorPosition  String?
-  accountantName    String?
+  legalAddress     String?
+  actualAddress    String?
+  phone            String?
+  email            String?
+  directorName     String?
+  directorPosition String?
+  accountantName   String?
 
   members             CompanyMember[]
   templates           DocumentTemplate[]
+  templateCategories  TemplateCategory[]
   generatedDocuments  GeneratedDocument[]
   subscription        Subscription?
   paymentTransactions PaymentTransaction[]
   auditLogs           AuditLog[]
   assets              CompanyAsset[]
+  // --- Administrative lock ---------------------------------------------------
+  /// Set while the tenant is suspended. Locking a company refuses every one of
+  /// its members, which is the difference between suspending an account and
+  /// chasing each of its users individually.
+  lockedAt            DateTime?
+  lockedReason        String?
+  lockedById          String?
+
+  usageCounters     UsageCounter[]
+  couponRedemptions CouponRedemption[]
+  paymentOrders     PaymentOrder[]
+  aiUsage           AiUsageRecord[]
+  scannedDocuments  ScannedDocument[]
+  documentChunks    DocumentChunk[]
+  notifications     Notification[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -209,11 +347,11 @@ model CompanyAsset {
 
   /// Object key within the private bucket. Randomised, never derived from the
   /// uploaded filename.
-  storageKey  String @unique
-  contentType String
-  sizeBytes   Int
+  storageKey   String  @unique
+  contentType  String
+  sizeBytes    Int
   /// SHA-256 of the stored bytes, for integrity checks and duplicate detection.
-  checksum    String
+  checksum     String
   /// Original filename, retained for display only — never used to build keys.
   originalName String?
 
@@ -259,19 +397,87 @@ model CompanyMember {
 // Templates and retrieval
 // ---------------------------------------------------------------------------
 
+/// Node in the template taxonomy tree.
+///
+/// The catalogue is expected to hold several thousand templates, so the tree is
+/// stored with a **materialized path** (`/contracts/supply/goods-supply`) rather
+/// than resolved by recursive joins: listing a whole branch becomes one indexed
+/// prefix scan, and depth is bounded only by the path length.
+///
+/// `companyId` is null for the platform-wide taxonomy every tenant sees, and set
+/// for categories a single company adds for itself. Postgres treats NULLs as
+/// distinct, so `@@unique([companyId, path])` does *not* constrain the shared
+/// rows — a partial unique index covers those and is appended by hand in the
+/// migration (see `template_categories_global_path_key`).
+model TemplateCategory {
+  id        String   @id @default(cuid())
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  parentId String?
+  parent   TemplateCategory?  @relation("TemplateCategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children TemplateCategory[] @relation("TemplateCategoryTree")
+
+  kind        TemplateCategoryKind
+  slug        String
+  name        String
+  /// Localised labels. The catalogue is authored in English and surfaced to
+  /// users in the locale they draft in.
+  nameRu      String?
+  nameUz      String?
+  description String?
+
+  /// Slugs from the root joined with '/', leading and trailing slash included
+  /// (`/contracts/supply/`) so a prefix match cannot select a sibling whose
+  /// slug merely starts with the same characters.
+  path      String
+  /// Root is 0. Denormalised from `path` to keep "direct children only" cheap.
+  depth     Int    @default(0)
+  sortOrder Int    @default(0)
+
+  templates DocumentTemplate[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@unique([companyId, path])
+  @@index([kind, depth, sortOrder])
+  @@index([companyId, kind, deletedAt])
+  @@index([parentId, sortOrder])
+  @@index([path])
+  @@map("template_categories")
+}
+
 model DocumentTemplate {
-  id          String         @id @default(cuid())
+  id          String  @id @default(cuid())
   companyId   String
-  company     Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  company     Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
   name        String
   slug        String
   description String?
+  /// Free-text label retained from before the taxonomy existed. New code should
+  /// read `categoryId`; this stays for rows written by earlier releases.
   category    String?
-  /// Template body, stored as editor JSON (TipTap document node).
-  content     Json
-  status      TemplateStatus @default(DRAFT)
-  version     Int            @default(1)
 
+  categoryId String?
+  taxonomy   TemplateCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  /// Body of the currently published version, denormalised so read paths that
+  /// only render a template need not join. `TemplateVersion.content` is the
+  /// authoritative history.
+  content Json
+  status  TemplateStatus @default(DRAFT)
+  /// Highest version number allocated so far. Advisory only — the authoritative
+  /// sequence is `TemplateVersion.version`, guarded by a unique constraint.
+  version Int            @default(1)
+
+  /// The version currently served to document generation. Null while a template
+  /// has never been published.
+  currentVersionId String?          @unique
+  currentVersion   TemplateVersion? @relation("TemplateCurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
+
+  versions           TemplateVersion[]   @relation("TemplateVersions")
   embeddings         TemplateEmbedding[]
   generatedDocuments GeneratedDocument[]
 
@@ -282,16 +488,70 @@ model DocumentTemplate {
   @@unique([companyId, slug])
   @@index([companyId, status, deletedAt])
   @@index([companyId, category])
+  @@index([categoryId, status, deletedAt])
   @@map("document_templates")
+}
+
+/// An immutable snapshot of a template.
+///
+/// Versions are never edited once published and never soft-deleted: a document
+/// generated last year must still resolve the exact text and variable contract
+/// it was generated from. Superseding a version archives it; "rolling back"
+/// clones an old version forward as a new one rather than reviving it.
+model TemplateVersion {
+  id         String           @id @default(cuid())
+  templateId String
+  template   DocumentTemplate @relation("TemplateVersions", fields: [templateId], references: [id], onDelete: Cascade)
+
+  /// 1-based, dense per template. The unique constraint below is what actually
+  /// serialises concurrent version allocation.
+  version Int
+  status  TemplateStatus @default(DRAFT)
+
+  /// Body snapshot, as editor JSON (TipTap document node).
+  content        Json
+  /// Declares the variables this version accepts — see the `VariableSchema`
+  /// contract in apps/api/src/modules/template/validation. Stored as JSON
+  /// because the shape is authored per template, not per deployment.
+  variableSchema Json
+  /// Ordered list of roles that must approve a document generated from this
+  /// version. Versioned with the body so changing the chain cannot retroactively
+  /// alter what an in-flight document agreed to.
+  approvalChain  Json
+
+  changeNote  String?
+  createdById String?
+  createdBy   User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  publishedAt DateTime?
+  archivedAt  DateTime?
+
+  currentFor DocumentTemplate?   @relation("TemplateCurrentVersion")
+  documents  GeneratedDocument[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // History, like AuditLog: no `deletedAt`. The unique pair is also the
+  // concurrency control for version allocation — two racing writers computing
+  // the same next number means one of them fails with P2002 rather than
+  // silently forking the history.
+  @@unique([templateId, version])
+  @@index([templateId, status])
+  @@index([templateId, version(sort: Desc)])
+  @@map("template_versions")
 }
 
 /// Chunked template text plus its embedding vector, for semantic retrieval.
 ///
-/// Dimension note: sized for `voyage-law-2` (1024 dims) — Voyage is Anthropic's
-/// recommended embedding partner and this model is legal-domain tuned. The
-/// column width is fixed at the database level, so switching providers (e.g.
-/// OpenAI `text-embedding-3-small` at 1536) requires a migration, not just a
-/// config change. `embeddingModel` records what actually produced each row.
+/// Dimension note: 1536, for OpenAI `text-embedding-3-small`. This was
+/// originally sized 1024 for `voyage-law-2`; it was widened so templates and
+/// scanned documents share one embedding space. Vectors from different models
+/// are not comparable at all — keeping two would mean two indexes, two backfill
+/// jobs, and a permanent trap where someone compares a template vector against a
+/// document vector and gets plausible-looking nonsense.
+///
+/// The widening migration DROPS the column: a dimension change cannot preserve
+/// existing vectors, so every template must be re-embedded afterwards.
 model TemplateEmbedding {
   id         String           @id @default(cuid())
   templateId String
@@ -299,12 +559,12 @@ model TemplateEmbedding {
 
   chunkIndex     Int
   content        String
-  embeddingModel String @default("voyage-law-2")
+  embeddingModel String @default("text-embedding-3-small")
 
   /// Optional so Prisma Client can insert the row; `Unsupported` columns are
   /// not writable through the generated client, so the vector itself is set by
   /// a follow-up `$executeRaw` UPDATE. Reads also go through raw SQL.
-  embedding Unsupported("vector(1024)")?
+  embedding Unsupported("vector(1536)")?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -321,13 +581,18 @@ model TemplateEmbedding {
 // ---------------------------------------------------------------------------
 
 model GeneratedDocument {
-  id         String            @id @default(cuid())
-  companyId  String
-  company    Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  templateId String?
-  template   DocumentTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  createdById String
-  createdBy   User             @relation(fields: [createdById], references: [id])
+  id                String            @id @default(cuid())
+  companyId         String
+  company           Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  templateId        String?
+  template          DocumentTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  /// The exact version that produced this document. Pinning the version rather
+  /// than only the template is what makes a generation reproducible after the
+  /// template moves on.
+  templateVersionId String?
+  templateVersion   TemplateVersion?  @relation(fields: [templateVersionId], references: [id], onDelete: SetNull)
+  createdById       String
+  createdBy         User              @relation(fields: [createdById], references: [id])
 
   title   String
   /// Generated body as editor JSON, mirroring DocumentTemplate.content.
@@ -340,6 +605,17 @@ model GeneratedDocument {
   failureReason   String?
   generatedAt     DateTime?
 
+  // --- Approval workflow ----------------------------------------------------
+  approvals       DocumentApproval[]
+  /// Incremented on every submission. A rejected document that is corrected and
+  /// resubmitted opens a new round, leaving the previous decisions on record.
+  approvalRound   Int                @default(0)
+  submittedAt     DateTime?
+  submittedById   String?
+  submittedBy     User?              @relation("DocumentSubmittedBy", fields: [submittedById], references: [id], onDelete: SetNull)
+  completedAt     DateTime?
+  rejectionReason String?
+
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
@@ -348,7 +624,44 @@ model GeneratedDocument {
   @@index([companyId, deletedAt])
   @@index([createdById, createdAt])
   @@index([templateId])
+  @@index([templateVersionId])
   @@map("generated_documents")
+}
+
+/// One step in a document's approval chain, instantiated from the template
+/// version's `approvalChain` at submission time.
+///
+/// Steps are decided strictly in ascending `stepOrder` within a round: an
+/// approval is a statement that everything before it was already approved, so
+/// allowing them out of order would make the record meaningless.
+model DocumentApproval {
+  id         String            @id @default(cuid())
+  documentId String
+  document   GeneratedDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  /// Which submission this step belongs to; mirrors `GeneratedDocument.approvalRound`.
+  round     Int @default(1)
+  /// 1-based position within the round.
+  stepOrder Int
+
+  /// Tenant role that may decide this step.
+  requiredRole CompanyMemberRole
+  label        String?
+
+  status      ApprovalStepStatus @default(PENDING)
+  decidedById String?
+  decidedBy   User?              @relation(fields: [decidedById], references: [id], onDelete: SetNull)
+  decidedAt   DateTime?
+  comment     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Decision history: no `deletedAt`. A withdrawn step is SKIPPED, not removed.
+  @@unique([documentId, round, stepOrder])
+  @@index([documentId, status])
+  @@index([decidedById, decidedAt])
+  @@map("document_approvals")
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +673,7 @@ model Subscription {
   companyId String  @unique
   company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
-  plan   SubscriptionPlan   @default(STARTER)
+  plan   SubscriptionPlan   @default(FREE)
   status SubscriptionStatus @default(TRIALING)
 
   providerCustomerId     String? @unique
@@ -372,7 +685,21 @@ model Subscription {
   cancelAtPeriodEnd  Boolean   @default(false)
   canceledAt         DateTime?
 
-  transactions PaymentTransaction[]
+  /// Negotiated limit overrides, keyed by UsageMetric. Enterprise terms are
+  /// agreed per customer, and encoding each variant as a new plan would mean a
+  /// migration every time sales closes a deal.
+  limitOverrides Json?
+
+  /// While a payment is failing, service continues until this moment. Null
+  /// unless the subscription is PAST_DUE.
+  graceEndsAt      DateTime?
+  /// Consecutive failed renewal attempts; reset on success.
+  renewalAttempts  Int       @default(0)
+  lastRenewalError String?
+
+  transactions  PaymentTransaction[]
+  redemptions   CouponRedemption[]
+  paymentOrders PaymentOrder[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -398,7 +725,7 @@ model PaymentTransaction {
   currency    String        @default("usd")
   status      PaymentStatus @default(PENDING)
 
-  providerTransactionId String? @unique
+  providerTransactionId String?   @unique
   providerInvoiceId     String?
   description           String?
   failureReason         String?
@@ -407,10 +734,570 @@ model PaymentTransaction {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// Discount actually applied to this charge, in the same minor units. The
+  /// gross amount stays in `amountCents` so the ledger shows list price and
+  /// discount separately rather than only the net.
+  discountCents Int     @default(0)
+  couponCode    String?
+
+  provider PaymentProvider?
+  orderId  String?
+  order    PaymentOrder?    @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
   @@index([companyId, createdAt])
   @@index([subscriptionId, status])
   @@index([status, processedAt])
+  @@index([orderId])
   @@map("payment_transactions")
+}
+
+/// A specific amount a company owes, created before payment begins.
+///
+/// The gateways all need a merchant-side identifier they can quote back —
+/// Click's `merchant_trans_id`, Payme's `account` field — and that identifier
+/// has to exist before the customer is redirected. Reusing PaymentTransaction
+/// for it would not work: the ledger is immutable by design, while an order is
+/// mutable right up until it is paid.
+model PaymentOrder {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  /// Plan this order buys, when it is a subscription purchase.
+  plan SubscriptionPlan?
+
+  /// Minor units. For UZS gateways this is tiyin; see PaymentAmount.
+  amountCents Int
+  currency    String             @default("usd")
+  status      PaymentOrderStatus @default(PENDING)
+  description String?
+
+  /// Set once a gateway claims the order; used to reject a second gateway
+  /// trying to pay the same order.
+  provider PaymentProvider?
+
+  /// After this the order can no longer be paid. Gateways have their own
+  /// timeouts (Payme's is 12 hours) and an order outliving them strands money.
+  expiresAt DateTime?
+  paidAt    DateTime?
+
+  transactions         PaymentTransaction[]
+  providerTransactions ProviderTransaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([companyId, status, createdAt])
+  @@index([status, expiresAt])
+  @@map("payment_orders")
+}
+
+/// A gateway's own transaction against one of our orders.
+///
+/// The unique pair below is the structural defence against double-billing: a
+/// gateway retrying a webhook — which all four do, aggressively, on any timeout
+/// or non-2xx — cannot create a second row, so the handler is forced down the
+/// "already seen this" path instead of charging again.
+model ProviderTransaction {
+  id       String          @id @default(cuid())
+  provider PaymentProvider
+
+  /// The gateway's identifier: Click's `click_trans_id`, Payme's transaction
+  /// `id`, Stripe's event/PaymentIntent id.
+  providerTransactionId String
+
+  orderId String
+  order   PaymentOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// Amount as the gateway stated it, in that gateway's minor units. Compared
+  /// against the order rather than trusted.
+  amountCents Int
+  state       ProviderTransactionState @default(CREATED)
+
+  /// Gateway-specific cancellation reason code, preserved verbatim because
+  /// Payme requires it echoed back on CheckTransaction.
+  reason Int?
+
+  createdTime   DateTime  @default(now())
+  performedTime DateTime?
+  canceledTime  DateTime?
+
+  /// The raw gateway payload, for dispute resolution. Money disagreements are
+  /// settled against what the gateway actually sent, not our interpretation.
+  rawPayload Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([provider, providerTransactionId])
+  @@index([orderId, state])
+  @@index([state, createdTime])
+  @@map("provider_transactions")
+}
+
+/// Cached response for a replayed request.
+///
+/// The unique constraints above stop a *duplicate charge*; this stops a
+/// duplicate *response*. Gateways compare the body of a retry against the body
+/// of the original and treat a difference as an error, so a replay has to
+/// return byte-identical output rather than merely being harmless.
+model IdempotencyRecord {
+  id  String @id @default(cuid())
+  /// Scope-prefixed, so a Click key and a Payme key cannot collide.
+  key String @unique
+
+  /// Hash of the request that first produced this response. A retry carrying
+  /// the same key but different content is a bug or an attack, not a retry.
+  requestHash String
+  statusCode  Int
+  response    Json
+
+  createdAt DateTime @default(now())
+  /// Records are pruned after this; keys are not needed once the gateway has
+  /// stopped retrying.
+  expiresAt DateTime
+
+  @@index([expiresAt])
+  @@map("idempotency_records")
+}
+
+// ---------------------------------------------------------------------------
+// Usage metering
+// ---------------------------------------------------------------------------
+
+/// One counter per company, per metric, per billing period.
+///
+/// Kept as a counter rather than derived by `COUNT(*)` over the underlying
+/// rows: a quota check runs on every generation request, and counting
+/// generated documents on each one is a table scan that grows without bound.
+/// The counter also survives its subject being deleted — a document that was
+/// generated and then removed still consumed the quota it was generated
+/// against.
+model UsageCounter {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  metric      UsageMetric
+  /// Inclusive start of the billing window this counter belongs to.
+  periodStart DateTime
+  /// Exclusive end. Denormalised so a window can be described without
+  /// re-deriving it from the subscription.
+  periodEnd   DateTime
+
+  used Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // The unique triple is what makes the atomic `INSERT … ON CONFLICT DO UPDATE`
+  // in UsageService correct: two concurrent generations cannot both create the
+  // window and each count one.
+  @@unique([companyId, metric, periodStart])
+  @@index([companyId, periodEnd])
+  @@map("usage_counters")
+}
+
+// ---------------------------------------------------------------------------
+// Coupons
+// ---------------------------------------------------------------------------
+
+/// A promotional discount.
+///
+/// Redemption limits are enforced against `CouponRedemption`, not against
+/// `timesRedeemed` alone — the counter is a denormalised convenience and a
+/// coupon that could be redeemed twice by racing requests is a revenue leak.
+model Coupon {
+  id          String  @id @default(cuid())
+  /// Always stored uppercase; lookups normalise before querying.
+  code        String  @unique
+  description String?
+
+  discountType   CouponDiscountType
+  /// 1–100, for PERCENTAGE coupons.
+  percentOff     Int?
+  /// Minor units, for FIXED_AMOUNT coupons.
+  amountOffCents Int?
+  /// Currency a FIXED_AMOUNT discount is denominated in; must match the charge.
+  currency       String             @default("usd")
+
+  duration         CouponDuration @default(ONCE)
+  /// Number of periods, for REPEATING.
+  durationInMonths Int?
+
+  /// Null means unlimited.
+  maxRedemptions Int?
+  timesRedeemed  Int                @default(0)
+  /// Empty means every plan.
+  appliesToPlans SubscriptionPlan[]
+  /// Minimum charge the coupon may be applied to, in minor units.
+  minAmountCents Int?
+  /// Restricts the coupon to a company's first paid subscription.
+  firstTimeOnly  Boolean            @default(false)
+
+  validFrom  DateTime?
+  validUntil DateTime?
+  active     Boolean   @default(true)
+
+  redemptions CouponRedemption[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([active, validUntil])
+  @@map("coupons")
+}
+
+/// Records that a company used a coupon.
+///
+/// The unique pair below is the actual enforcement of "once per customer";
+/// checking a count before inserting would let two simultaneous checkouts both
+/// pass.
+model CouponRedemption {
+  id       String @id @default(cuid())
+  couponId String
+  coupon   Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  /// Discount granted at redemption, in minor units. Frozen here so a later
+  /// edit to the coupon cannot rewrite what a customer was actually given.
+  discountCents    Int
+  /// Periods still to be discounted, for REPEATING coupons. Null = unlimited.
+  periodsRemaining Int?
+
+  redeemedAt DateTime @default(now())
+
+  @@unique([couponId, companyId])
+  @@index([companyId, redeemedAt])
+  @@map("coupon_redemptions")
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  SMS
+  TELEGRAM
+}
+
+enum NotificationStatus {
+  /// Row created, not yet handed to a queue.
+  PENDING
+  /// Accepted by BullMQ; a worker will pick it up.
+  QUEUED
+  /// Handed to the provider and acknowledged.
+  SENT
+  /// Provider confirmed delivery to the device. Only SMS reports this.
+  DELIVERED
+  /// Retries exhausted, or the provider rejected it permanently.
+  FAILED
+  /// Not attempted — recipient opted out, quiet hours, or no address on file.
+  SKIPPED
+}
+
+/// One delivery attempt of one event on one channel.
+///
+/// A single event fans out into several of these — an approval request might be
+/// an in-app badge, an email, and a Telegram message. Keeping them as separate
+/// rows is what lets the email fail and be retried while the in-app copy is
+/// already read.
+model Notification {
+  id        String   @id @default(cuid())
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Domain event key, e.g. `document.approval_requested`. Matches the catalogue
+  /// in apps/api/src/modules/notification/events.
+  event   String
+  channel NotificationChannel
+  status  NotificationStatus  @default(PENDING)
+
+  title String
+  body  String
+  /// Structured payload for in-app rendering and deep links.
+  data  Json?
+
+  /// Resolved recipient address: phone, email, or Telegram chat id. Null for
+  /// IN_APP, which addresses the user directly.
+  destination String?
+
+  attempts          Int     @default(0)
+  lastError         String?
+  /// Provider's own id, for reconciling a delivery report against our record.
+  providerMessageId String?
+
+  /// Collapses duplicates. Two approval reminders for the same step on the same
+  /// day are one notification, and the unique index is what enforces that rather
+  /// than a check that two workers can both pass.
+  dedupeKey String? @unique
+
+  /// IN_APP only.
+  readAt      DateTime?
+  sentAt      DateTime?
+  deliveredAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, readAt, createdAt])
+  @@index([companyId, createdAt])
+  @@index([status, channel, createdAt])
+  @@map("notifications")
+}
+
+/// Per-user delivery settings.
+///
+/// Which events reach which channel is defined in code (see the event
+/// catalogue); this records only what the *user* chose, plus the addresses to
+/// reach them at.
+model NotificationPreference {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Channels the user accepts. IN_APP is always implied and not listed here —
+  /// there is no opting out of your own inbox.
+  enabledChannels NotificationChannel[]
+
+  /// Overrides the account email for notifications.
+  email          String?
+  /// E.164. Distinct from the auth phone: people give a different number for
+  /// alerts than for two-factor.
+  phone          String?
+  /// Set once the user has messaged the bot; Telegram cannot be messaged first.
+  telegramChatId String?
+
+  /// Local hours during which only IN_APP is delivered. Null disables the rule.
+  /// A contract deadline at 03:00 is not worth an SMS.
+  quietHoursStart Int?
+  quietHoursEnd   Int?
+  /// IANA zone the quiet hours are evaluated in.
+  timezone        String @default("Asia/Tashkent")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("notification_preferences")
+}
+
+// ---------------------------------------------------------------------------
+// OCR and search
+// ---------------------------------------------------------------------------
+
+enum OcrStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  /// OCR produced text, but below the confidence floor — usable with a caveat,
+  /// which is different from having failed.
+  LOW_CONFIDENCE
+  FAILED
+}
+
+/// A scanned or uploaded document put through text extraction.
+///
+/// Separate from `GeneratedDocument`: that is text this platform authored, this
+/// is text it was handed and had to read. They are searched together but their
+/// lifecycles have nothing in common.
+model ScannedDocument {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  uploadedById String?
+
+  /// Object key in the private bucket. The bytes never live in this table.
+  storageKey   String @unique
+  originalName String
+  contentType  String
+  sizeBytes    Int
+  /// SHA-256 of the stored bytes. Also how a re-upload of the same file is
+  /// recognised without re-running OCR, which is the expensive part.
+  checksum     String
+
+  status           OcrStatus @default(PENDING)
+  /// Tesseract language codes actually used, e.g. ["uzb","rus"].
+  languages        String[]
+  pageCount        Int?
+  /// Mean Tesseract confidence, 0–100. Null when text came from a PDF text
+  /// layer, which has no confidence to report — it was not a guess.
+  confidence       Float?
+  /// `pdf_text_layer` or `tesseract`. Worth recording: text-layer extraction is
+  /// exact, OCR is an estimate, and a reviewer needs to know which they have.
+  extractionMethod String?
+
+  /// Full extracted text, retained so a document can be re-chunked when the
+  /// chunking strategy changes without paying for OCR again.
+  extractedText String?
+
+  failureReason String?
+  processingMs  Int?
+  /// Retry counter, so a permanently failing document stops being picked up.
+  attempts      Int     @default(0)
+
+  chunks DocumentChunk[]
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+  deletedAt   DateTime?
+
+  @@index([companyId, status, createdAt])
+  @@index([status, attempts])
+  @@index([companyId, checksum])
+  @@map("scanned_documents")
+}
+
+/// One searchable passage.
+///
+/// Carries both halves of hybrid retrieval: a `vector(1536)` for semantic
+/// similarity via cosine distance (`<=>`), and a generated `tsvector` for
+/// lexical matching. Both are written by hand in the migration — Prisma models
+/// neither generated columns nor vector operators.
+model DocumentChunk {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  scannedDocumentId String
+  scannedDocument   ScannedDocument @relation(fields: [scannedDocumentId], references: [id], onDelete: Cascade)
+
+  /// 0-based position within the document, for reassembling context.
+  chunkIndex Int
+  content    String
+  /// Approximate token count, used to bound embedding batch sizes.
+  tokenCount Int
+  /// Source page, where the extractor could attribute one. Null for text-layer
+  /// extraction that did not preserve page boundaries.
+  page       Int?
+
+  embeddingModel String                       @default("text-embedding-3-small")
+  /// Set by a follow-up `$executeRaw` UPDATE; `Unsupported` columns are not
+  /// writable through the generated client.
+  embedding      Unsupported("vector(1536)")?
+
+  /// Generated column: `to_tsvector('simple', content)`. See the migration for
+  /// why the configuration is `simple` rather than `russian`.
+  searchVector Unsupported("tsvector")?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Derived data, rebuilt from `ScannedDocument.extractedText`: no soft delete,
+  // cascades with its parent.
+  @@unique([scannedDocumentId, chunkIndex])
+  @@index([companyId, scannedDocumentId])
+  @@map("document_chunks")
+}
+
+// ---------------------------------------------------------------------------
+// AI cost tracking
+// ---------------------------------------------------------------------------
+
+/// One row per billable model call.
+///
+/// Recorded per call rather than aggregated, because the questions asked of it
+/// are unpredictable: cost by tenant this month, which model got expensive after
+/// a prompt change, whether one customer is responsible for the entire vendor
+/// bill. Rolling up on write answers only the questions known in advance.
+model AiUsageRecord {
+  id        String   @id @default(cuid())
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  /// Vendor: `anthropic`, `openai`.
+  provider  String
+  /// Exact model id the vendor reported, not the one requested — a silently
+  /// substituted model is precisely what makes a bill jump.
+  model     String
+  /// What the call was for, e.g. `document_generation`.
+  operation String
+
+  inputTokens       Int
+  outputTokens      Int
+  /// Cached-read and cache-write tokens are priced differently by both vendors.
+  cachedInputTokens Int @default(0)
+
+  /// Cost in MILLIONTHS of a USD.
+  ///
+  /// Cents cannot express this: a thousand input tokens on a cheap model costs a
+  /// small fraction of one cent, and rounding each call to a cent turns a real
+  /// bill into either zero or a large overstatement.
+  costMicroUsd Int
+
+  createdAt DateTime @default(now())
+
+  // Append-only measurement, like AuditLog: no `updatedAt`, no `deletedAt`.
+  @@index([companyId, createdAt])
+  @@index([createdAt])
+  @@index([model, createdAt])
+  @@map("ai_usage_records")
+}
+
+// ---------------------------------------------------------------------------
+// Impersonation
+// ---------------------------------------------------------------------------
+
+/// A SUPER_ADMIN acting as another user, for support.
+///
+/// The row is the authority, not the token. A 15-minute JWT that cannot be
+/// revoked is a 15-minute window in which a stolen token is a working session
+/// for someone else's account, so every request carrying an impersonation token
+/// checks this record — see JwtStrategy.
+model ImpersonationSession {
+  id String @id @default(cuid())
+
+  impersonatorId String
+  impersonator   User   @relation("ImpersonationActor", fields: [impersonatorId], references: [id], onDelete: Cascade)
+
+  targetUserId String
+  targetUser   User   @relation("ImpersonationTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  /// Tenant the session was scoped to, recorded so the audit trail shows which
+  /// customer's data was reachable.
+  targetCompanyId String?
+
+  /// Mandatory justification. An impersonation with no stated reason is
+  /// indistinguishable from snooping when it is reviewed six months later.
+  reason String
+
+  /// The access token's `jti`. Binds one token to this row: a second token
+  /// cannot ride the same session, and revoking the row kills the token.
+  jti String @unique
+
+  ipAddress String?
+  userAgent String?
+
+  startedAt DateTime  @default(now())
+  /// Hard ceiling, 15 minutes from issue. Enforced here as well as in the JWT
+  /// so a forged `exp` gains nothing.
+  expiresAt DateTime
+  /// Set when the operator ends the session, or when it is revoked centrally.
+  endedAt   DateTime?
+  revokedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([impersonatorId, startedAt])
+  @@index([targetUserId, startedAt])
+  @@index([expiresAt])
+  @@map("impersonation_sessions")
 }
 
 // ---------------------------------------------------------------------------

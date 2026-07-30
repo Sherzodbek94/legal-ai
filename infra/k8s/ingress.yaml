@@ -1,17 +1,51 @@
+# =============================================================================
+# Nginx Ingress + TLS
+# =============================================================================
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: legaltech-ingress
   namespace: legaltech
   annotations:
-    kubernetes.io/ingress.class: "nginx"
+    # cert-manager watches this and provisions `legaltech-tls` from the issuer
+    # below. The certificate is renewed automatically at two-thirds of its
+    # lifetime, so nothing here needs a calendar reminder.
     cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
-    # Gateway-level rate limiting; complements the in-app @nestjs/throttler guard.
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+    # 25MB, matching the OCR upload ceiling in OcrSearchController. Nginx's
+    # default is 1MB and it rejects larger bodies with a 413 *before* the
+    # application sees them — so a mismatch here presents as scanned uploads
+    # failing for no reason the API can explain.
+    nginx.ingress.kubernetes.io/proxy-body-size: "25m"
+
+    # PDF generation and OCR both exceed the 60s default. The read timeout is
+    # what governs how long nginx waits for the API's response.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "180"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "180"
+
+    # Streamed PDF exports must not be buffered: with buffering on, nginx holds
+    # the whole document before sending a byte, which discards the entire point of
+    # streaming it and puts the memory back on the proxy.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+
+    # Gateway-level rate limiting, complementing @nestjs/throttler. This one is
+    # per source IP at the edge and survives the application being saturated.
     nginx.ingress.kubernetes.io/limit-rps: "20"
     nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
+
+    # HSTS. Long max-age with preload is a commitment — once a browser has seen
+    # it, HTTP to this host is refused for the whole duration, so it should only
+    # be enabled when every subdomain is genuinely HTTPS-only.
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "Strict-Transport-Security: max-age=31536000; includeSubDomains";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
 spec:
+  ingressClassName: nginx
   tls:
     - hosts:
         - app.legaltech.example.com
@@ -20,17 +54,67 @@ spec:
     - host: app.legaltech.example.com
       http:
         paths:
+          # WebSocket namespace, routed first. Nginx Ingress upgrades connections
+          # automatically, but the timeouts below have to be long or idle sockets
+          # are cut every minute and clients reconnect in a loop.
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service:
+                name: legaltech-api
+                port:
+                  name: http
           - path: /api
             pathType: Prefix
             backend:
               service:
                 name: legaltech-api
                 port:
-                  number: 4000
+                  name: http
           - path: /
             pathType: Prefix
             backend:
               service:
                 name: legaltech-web
                 port:
-                  number: 3000
+                  name: http
+---
+# =============================================================================
+# WebSocket ingress
+#
+# A separate Ingress for /socket.io, because the timeouts a long-lived socket
+# needs (hours) are ones the HTTP routes must not have — an hour-long read
+# timeout on the REST API would let a hung upstream hold a worker indefinitely.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: legaltech-ingress-ws
+  namespace: legaltech
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Sticky sessions are NOT enabled, and that is deliberate: the Socket.IO
+    # Redis adapter means any replica can serve any client, so pinning them would
+    # only unbalance the load. Sticky sessions would be mandatory if the adapter
+    # were ever removed.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.legaltech.example.com
+      secretName: legaltech-tls
+  rules:
+    - host: app.legaltech.example.com
+      http:
+        paths:
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service:
+                name: legaltech-api
+                port:
+                  name: http

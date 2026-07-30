@@ -1,0 +1,116 @@
+# =============================================================================
+# Horizontal Pod Autoscalers
+#
+# The HPA owns replica counts; neither Deployment declares one. Both are
+# specified with `behavior` because the v2 defaults are wrong for these
+# workloads — the default scale-down stabilisation of 300s combined with an
+# unbounded scale-up produces a service that overshoots on a spike and then
+# collapses capacity the moment it passes.
+# =============================================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: legaltech-api
+  namespace: legaltech
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: legaltech-api
+
+  # Two minimum, not one: a single replica means a node drain or a rolling deploy
+  # has a moment with no capacity, and `maxUnavailable: 0` cannot help when there
+  # is only one pod to be unavailable.
+  minReplicas: 2
+  maxReplicas: 10
+
+  metrics:
+    # 70%, not the more common 80%. PDF rendering and OCR are bursty and
+    # CPU-heavy, so a pod at 80% average is already queueing; the headroom buys
+    # time for the new pod to become ready, which for this image is not instant.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+    # Memory as a secondary signal. Chromium and Tesseract hold memory while
+    # working, so sustained memory pressure indicates real concurrent load even
+    # when CPU looks unremarkable — and memory is the limit that OOMKills.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+
+  behavior:
+    scaleUp:
+      # React quickly. A queue of exports building up is worse than a briefly
+      # over-provisioned deployment.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+      # Whichever policy allows more, so a small deployment can still double.
+      selectPolicy: Max
+
+    scaleDown:
+      # Deliberately slow — five minutes of stability before removing capacity.
+      # Scaling down aggressively on this workload terminates pods mid-render:
+      # a 90-second termination grace period means each removal is expensive, and
+      # a flapping metric would spend the whole day draining and re-adding pods.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+      selectPolicy: Min
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: legaltech-web
+  namespace: legaltech
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: legaltech-web
+
+  minReplicas: 2
+  maxReplicas: 8
+
+  metrics:
+    # Higher threshold than the API. The web tier is I/O-bound waiting on API
+    # calls, so a high CPU average genuinely means saturation rather than a
+    # single expensive request monopolising a core.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      # Shorter than the API's: web pods start fast and drain in seconds, so
+      # removing one costs little and reclaiming the capacity is worth more.
+      stabilizationWindowSeconds: 180
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+      selectPolicy: Min
