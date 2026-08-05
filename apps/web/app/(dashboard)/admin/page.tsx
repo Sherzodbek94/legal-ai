@@ -9,6 +9,10 @@ import {
   Th,
 } from '@/components/admin/panel';
 import { EndImpersonationButton } from '@/components/admin/impersonate-button';
+import {
+  MrrByPlanChart,
+  MrrMovementChart,
+} from '@/components/admin/revenue-charts';
 import { apiGet } from '@/lib/api';
 import {
   formatCents,
@@ -33,6 +37,7 @@ interface Dashboard {
     contractionMrrCents: number;
     churnedMrrCents: number;
     netChangeCents: number;
+    openingMrrCents: number;
     revenueChurnRate: number | null;
     customerChurnRate: number | null;
     estimatedLtvCents: number | null;
@@ -107,59 +112,12 @@ export default async function AdminOverviewPage() {
           </section>
 
           <div className="grid gap-6 lg:grid-cols-2">
-            <Panel
-              title="MRR movement this month"
-              description="Reconstructed from charges in the prior month — see the note below"
-            >
-              <dl className="divide-y divide-border">
-                {[
-                  {
-                    label: 'New',
-                    value: dashboard.data.movement.newMrrCents,
-                    tone: 'positive' as const,
-                  },
-                  {
-                    label: 'Expansion',
-                    value: dashboard.data.movement.expansionMrrCents,
-                    tone: 'positive' as const,
-                  },
-                  {
-                    label: 'Contraction',
-                    value: -dashboard.data.movement.contractionMrrCents,
-                    tone: 'negative' as const,
-                  },
-                  {
-                    label: 'Churned',
-                    value: -dashboard.data.movement.churnedMrrCents,
-                    tone: 'negative' as const,
-                  },
-                ].map((row) => (
-                  <div
-                    key={row.label}
-                    className="flex items-center justify-between px-5 py-3"
-                  >
-                    <dt className="text-sm text-muted-foreground">{row.label}</dt>
-                    <dd
-                      className={`text-sm font-medium tabular-nums ${
-                        row.value === 0
-                          ? 'text-muted-foreground'
-                          : row.tone === 'positive'
-                            ? 'text-success'
-                            : 'text-destructive'
-                      }`}
-                    >
-                      {formatSignedCents(row.value)}
-                    </dd>
-                  </div>
-                ))}
-                <div className="flex items-center justify-between bg-muted/40 px-5 py-3">
-                  <dt className="text-sm font-semibold">Net change</dt>
-                  <dd className="text-sm font-semibold tabular-nums">
-                    {formatSignedCents(dashboard.data.movement.netChangeCents)}
-                  </dd>
-                </div>
-              </dl>
-              <div className="grid grid-cols-3 gap-3 border-t border-border px-5 py-4 text-center">
+            <div className="space-y-4">
+              <MrrMovementChart movement={dashboard.data.movement} />
+              {/* The rates stay beside the chart rather than inside it: they are
+                  ratios over the same period, not another bar to compare against
+                  these four. */}
+              <div className="grid grid-cols-3 gap-3 rounded-lg border border-border bg-card px-5 py-4 text-center">
                 <div>
                   <p className="text-xs text-muted-foreground">Revenue churn</p>
                   <p className="mt-0.5 text-sm font-medium tabular-nums">
@@ -176,45 +134,14 @@ export default async function AdminOverviewPage() {
                   <p className="text-xs text-muted-foreground">Est. LTV</p>
                   <p className="mt-0.5 text-sm font-medium tabular-nums">
                     {dashboard.data.movement.estimatedLtvCents === null
-                      ? '—'
+                      ? String.fromCharCode(8212)
                       : formatCents(dashboard.data.movement.estimatedLtvCents)}
                   </p>
                 </div>
               </div>
-            </Panel>
+            </div>
 
-            <Panel title="Plan distribution">
-              <TableScroll>
-                <table className="w-full">
-                  <thead className="border-b border-border">
-                    <tr>
-                      <Th>Plan</Th>
-                      <Th className="text-right">Accounts</Th>
-                      <Th className="text-right">MRR</Th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
-                    {Object.entries(dashboard.data.revenue.byPlan).map(
-                      ([plan, row]) => (
-                        <tr key={plan}>
-                          <Td>
-                            <Badge variant={plan === 'FREE' ? 'outline' : 'secondary'}>
-                              {plan}
-                            </Badge>
-                          </Td>
-                          <Td className="text-right tabular-nums">
-                            {formatNumber(row.customers)}
-                          </Td>
-                          <Td className="text-right tabular-nums">
-                            {formatCents(row.mrrCents)}
-                          </Td>
-                        </tr>
-                      ),
-                    )}
-                  </tbody>
-                </table>
-              </TableScroll>
-            </Panel>
+            <MrrByPlanChart byPlan={dashboard.data.revenue.byPlan} />
           </div>
 
           <section aria-labelledby="platform-heading">
