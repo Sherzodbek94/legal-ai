@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test": "jest",
     "clean": "rimraf .next"
   },
   "dependencies": {
@@ -28,15 +29,18 @@
     "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^20.14.15",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
     "autoprefixer": "^10.5.4",
     "eslint": "^8.57.0",
     "eslint-config-next": "14.2.35",
+    "jest": "^30.4.2",
     "postcss": "^8.5.24",
     "rimraf": "^6.0.1",
     "tailwindcss": "^3.4.19",
+    "ts-jest": "^29.4.12",
     "typescript": "^5.5.4"
   }
 }
