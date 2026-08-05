@@ -9,6 +9,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { winstonConfig } from './common/logger/winston.config';
 import { numericConfig } from './config/numeric-config';
+import { validateEnv } from './config/env.validation';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
@@ -57,6 +58,9 @@ import { NotificationModule } from './modules/notification/notification.module';
       envFilePath: [join(__dirname, '../../../.env'), '.env'],
       // Turns the numeric settings into actual numbers — see numericConfig.
       load: [numericConfig],
+      // Refuses to boot on a broken environment — see envValidation for what
+      // counts as broken and why each rule is worth a failed startup.
+      validate: validateEnv,
     }),
     WinstonModule.forRoot(winstonConfig),
     // Starts the @Cron handlers registered by RenewalService.
