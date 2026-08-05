@@ -36,6 +36,11 @@ export class OpenAiProvider implements LlmProvider {
     if (!this.client) {
       this.client = new OpenAI({
         apiKey: this.config.getOrThrow<string>('OPENAI_API_KEY'),
+        // Same deadline as the primary provider — see the note there. This is
+        // the failover path, so an unbounded wait here means a request that
+        // already spent its budget on the first provider spends it again.
+        timeout: this.config.get<number>('AI_REQUEST_TIMEOUT_MS', 120_000),
+        maxRetries: 1,
       });
     }
     return this.client;

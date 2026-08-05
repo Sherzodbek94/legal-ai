@@ -41,10 +41,32 @@ export class AnthropicProvider implements LlmProvider {
     return Boolean(this.config.get<string>('ANTHROPIC_API_KEY'));
   }
 
+  /**
+   * How long a single generation may take before it is abandoned.
+   *
+   * The SDK's own default is 10 minutes, and it retries twice — so an
+   * unconfigured client can hold a request open for **half an hour** and report
+   * nothing at all while it does. That is what a stuck "Generating…" button is:
+   * not a crash, just a caller with no deadline. The failover to the other
+   * provider, and the fallback to the plain interpolated template, both sit
+   * behind this timeout and cannot run until it fires.
+   *
+   * Two minutes is generous for a document draft at `medium` effort and short
+   * enough that a person still gets an answer.
+   */
+  private get timeoutMs(): number {
+    return this.config.get<number>('AI_REQUEST_TIMEOUT_MS', 120_000);
+  }
+
   private getClient(): Anthropic {
     if (!this.client) {
       this.client = new Anthropic({
         apiKey: this.config.getOrThrow<string>('ANTHROPIC_API_KEY'),
+        timeout: this.timeoutMs,
+        // One retry, not the default two: a timeout is retried like any other
+        // failure, so the worst case is `timeout × (maxRetries + 1)`. Two
+        // retries would put that back over five minutes.
+        maxRetries: 1,
       });
     }
     return this.client;
