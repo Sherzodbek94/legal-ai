@@ -58,14 +58,124 @@ export async function apiGet<T>(path: string): Promise<ApiResult<T>> {
   }
 }
 
-async function readError(response: Response): Promise<string> {
+/** A field-level validation issue, as returned by the variable validator. */
+export interface ApiIssue {
+  key: string;
+  message: string;
+}
+
+export type ApiWriteResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; status: number; message: string; issues?: ApiIssue[] };
+
+/**
+ * Writes to the API as the current user, from a Server Action.
+ *
+ * Server-side rather than a browser `fetch` for the same reason the reads are:
+ * the session cookie is HTTPOnly and SameSite-scoped, so posting from the
+ * browser to a different origin would need CORS credentials and a relaxed
+ * cookie policy — weakening the CSRF posture to save a hop.
+ *
+ * Carries `issues` through separately from `message`. A rejected generation
+ * names the fields that failed, and collapsing that to one string means the
+ * form can only say "something was wrong".
+ */
+export async function apiPost<T>(
+  path: string,
+  body: unknown,
+): Promise<ApiWriteResult<T>> {
   try {
-    const body = (await response.json()) as { message?: unknown };
-    if (typeof body.message === 'string') return body.message;
-    if (Array.isArray(body.message)) return body.message.join(', ');
+    const response = await fetch(`${API_URL}${path}`, {
+      method: 'POST',
+      headers: {
+        cookie: cookies().toString(),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      cache: 'no-store',
+    });
+
+    if (!response.ok) {
+      const parsed = await readErrorBody(response);
+      return {
+        ok: false,
+        status: response.status,
+        message: parsed.message,
+        issues: parsed.issues,
+      };
+    }
+
+    return { ok: true, data: (await response.json()) as T };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      message:
+        error instanceof Error ? error.message : 'Could not reach the API',
+    };
+  }
+}
+
+async function readError(response: Response): Promise<string> {
+  return (await readErrorBody(response)).message;
+}
+
+async function readErrorBody(
+  response: Response,
+): Promise<{ message: string; issues?: ApiIssue[] }> {
+  const fallback =
+    response.statusText || `Request failed with status ${response.status}`;
+
+  try {
+    const body = (await response.json()) as Record<string, unknown>;
+
+    /*
+     * The payload is nested one level deeper than it looks.
+     *
+     * `AllExceptionsFilter` builds its response as
+     * `{ statusCode, path, method, message: exception.getResponse() }` — and
+     * `getResponse()` is already the full object a handler threw. So a
+     * validation failure arrives as:
+     *
+     *   { statusCode: 422, message: { message: "Invalid variable values",
+     *                                 issues: [{ key, message }] } }
+     *
+     * Reading `body.issues` finds nothing, and `body.message` is an object
+     * rather than a string — which is why every field-level rejection used to
+     * render as the bare status text "Unprocessable Entity", with the per-field
+     * reasons the API had gone to the trouble of returning thrown away.
+     *
+     * Both shapes are accepted: ValidationPipe failures and anything thrown
+     * with a plain string still arrive flat.
+     */
+    const inner =
+      body.message !== null && typeof body.message === 'object'
+        ? (body.message as Record<string, unknown>)
+        : body;
+
+    const raw = inner.message ?? body.message;
+    const message =
+      typeof raw === 'string'
+        ? raw
+        : Array.isArray(raw)
+          ? raw.join(', ')
+          : fallback;
+
+    const rawIssues = inner.issues ?? body.issues;
+    const issues = Array.isArray(rawIssues)
+      ? (rawIssues.filter(
+          (issue): issue is ApiIssue =>
+            typeof issue === 'object' &&
+            issue !== null &&
+            typeof (issue as ApiIssue).key === 'string' &&
+            typeof (issue as ApiIssue).message === 'string',
+        ) as ApiIssue[])
+      : undefined;
+
+    return { message, issues };
   } catch {
     // Non-JSON error body; fall through to the status text.
+    return { message: fallback };
   }
-  return response.statusText || `Request failed with status ${response.status}`;
 }
 

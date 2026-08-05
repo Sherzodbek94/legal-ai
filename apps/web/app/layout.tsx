@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import { cn } from '@/lib/utils';
+import { ToastProvider } from '@/components/ui/toast';
+import { ThemeScript } from '@/components/theme/theme-script';
 import './globals.css';
 
 const inter = Inter({
@@ -24,6 +26,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        <ThemeScript />
+      </head>
       <body className={cn(inter.variable, 'min-h-screen bg-background font-sans')}>
         {/*
           WCAG 2.1 AA 2.4.1 Bypass Blocks — visually hidden until focused, so
@@ -35,7 +40,7 @@ export default function RootLayout({
         >
           Skip to main content
         </a>
-        {children}
+        <ToastProvider>{children}</ToastProvider>
       </body>
     </html>
   );

@@ -171,3 +171,98 @@
     @apply rounded bg-muted px-1 py-0.5 font-mono text-sm;
   }
 }
+
+/*
+ * Chart colours.
+ *
+ * Validated with the dataviz palette validator against this app's own card
+ * surfaces in each mode — lightness band, chroma floor, CVD separation,
+ * normal-vision floor, and contrast all pass:
+ *
+ *   diverging poles, light   ΔE 23.7 protan / 31.9 normal
+ *   diverging poles, dark    ΔE 19.1 protan / 25.8 normal
+ *   sequential ramp          monotone L, single hue, gaps >= 0.06
+ *
+ * Green/red was rejected for the movement chart despite being the finance
+ * convention: it is the worst possible pair for a red-green colour blind
+ * reader. Blue↔red reads as equally opposite and separates cleanly. Position
+ * (which side of the zero axis) and a direct label carry the meaning anyway,
+ * so colour is never the only channel.
+ *
+ * Here rather than in an inline <style>: a `[class~="dark"]` selector inside
+ * JSX hydrates differently on server and client (React escapes the quotes on
+ * one side only), which threw a real "Text content does not match" error.
+ *
+ * The dark steps are chosen against the dark surface, not derived from the
+ * light ones — an automatic flip lands outside the lightness band.
+ */
+.revenue-chart {
+  --gain: #3b67ce;
+  --loss: #d43535;
+  --seq-1: #96aad9;
+  --seq-2: #6280c6;
+  --seq-3: #3b5ba5;
+  --seq-4: #293e70;
+}
+
+.dark .revenue-chart {
+  --gain: #6389e3;
+  --loss: #e36363;
+  --seq-1: #98aee1;
+  --seq-2: #6989d3;
+  --seq-3: #3963c6;
+  --seq-4: #2c4c96;
+}
+
+/*
+ * Staggered entrance for a list.
+ *
+ * Each child starts a beat after the one above it, so a table or card grid
+ * resolves top-to-bottom instead of appearing as one block. Capped at eight:
+ * past that the last row waits long enough to read as slow rather than
+ * considered, and a long list should not animate at all.
+ *
+ * The reduced-motion block below removes the animation outright rather than
+ * shortening it. The global reset in @layer base only collapses durations to
+ * 0.01ms, which would still run every delay in sequence — the list would sit
+ * blank and then snap in, which is worse than not animating.
+ */
+.stagger > * {
+  animation: rise-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 30ms; }
+.stagger > *:nth-child(3) { animation-delay: 60ms; }
+.stagger > *:nth-child(4) { animation-delay: 90ms; }
+.stagger > *:nth-child(5) { animation-delay: 120ms; }
+.stagger > *:nth-child(6) { animation-delay: 150ms; }
+.stagger > *:nth-child(7) { animation-delay: 180ms; }
+.stagger > *:nth-child(n + 8) { animation-delay: 210ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  .stagger > * {
+    animation: none;
+  }
+}
+
+/*
+ * Press feedback.
+ *
+ * A 1% scale on :active is below the threshold at which motion registers as
+ * movement, but it is enough for a press to feel acknowledged.
+ *
+ * Pointer devices only. On a touch screen `:active` latches while a finger is
+ * down, so it also fires on the way into a scroll — every control the gesture
+ * started on would shrink and stay shrunk until the scroll ended.
+ */
+@media (hover: hover) {
+  .press:active:not(:disabled) {
+    transform: scale(0.99);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .press:active:not(:disabled) {
+    transform: none;
+  }
+}

@@ -55,7 +55,9 @@ COPY . .
 # at runtime. That means the API URL is baked into the image and an image built
 # for staging cannot be promoted to production unchanged — the CI workflow passes
 # it as a build argument per environment for exactly this reason.
-ARG NEXT_PUBLIC_API_URL=http://localhost:4000
+# Must include the /api suffix — the API is mounted under a global `/api` prefix
+# and the Ingress routes /api to it on the same origin.
+ARG NEXT_PUBLIC_API_URL=http://localhost:4000/api
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
 RUN npm run build --workspace=@legaltech/web

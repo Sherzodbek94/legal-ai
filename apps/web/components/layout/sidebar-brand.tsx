@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils';
 export function SidebarBrand({ className }: { className?: string }) {
   return (
     <Link
-      href="/"
+      href="/dashboard"
       className={cn(
         'flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sidebar-foreground',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar',

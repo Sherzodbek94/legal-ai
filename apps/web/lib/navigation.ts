@@ -1,12 +1,14 @@
 import {
-  Bot,
   Building2,
   CreditCard,
   FileText,
   LayoutDashboard,
-  Scale,
+  LibraryBig,
+  ScanLine,
+  Search,
   Settings,
   ShieldAlert,
+  Users,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -19,53 +21,48 @@ export interface NavItem {
 export interface NavSection {
   label: string;
   items: NavItem[];
-  /** Sections only platform staff should see listed. */
+  /** Rendered only for platform staff. Enforced in SidebarNav. */
   superAdminOnly?: boolean;
 }
 
+/**
+ * Sidebar navigation.
+ *
+ * EVERY ENTRY HERE MUST RESOLVE TO A REAL PAGE. This list previously advertised
+ * `/matters` and `/ai`, neither of which existed — five of eight links returned
+ * 404, which is what a user experiences as a broken product rather than as an
+ * unfinished one.
+ *
+ * Both were removed rather than stubbed:
+ *   * `/matters` has no backend at all — there is no Matter model in the schema.
+ *   * `/ai` has no persisted state; the AI engine returns a draft without saving
+ *     it, so a page could only ever be a throwaway playground.
+ *
+ * When either gains a backend, add the link back alongside the page.
+ */
 export const navSections: NavSection[] = [
   {
     label: 'Workspace',
     items: [
-      { title: 'Dashboard', href: '/', icon: LayoutDashboard },
-      { title: 'Matters', href: '/matters', icon: Scale },
+      { title: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
       { title: 'Documents', href: '/documents', icon: FileText },
+      { title: 'Templates', href: '/templates', icon: LibraryBig },
+      { title: 'Scans', href: '/scans', icon: ScanLine },
+      { title: 'Search', href: '/search', icon: Search },
     ],
-  },
-  {
-    label: 'Intelligence',
-    items: [{ title: 'AI Analysis', href: '/ai', icon: Bot }],
   },
   {
     label: 'Administration',
     items: [
       { title: 'Companies', href: '/companies', icon: Building2 },
+      { title: 'Team', href: '/team', icon: Users },
       { title: 'Billing', href: '/billing', icon: CreditCard },
       { title: 'Settings', href: '/settings', icon: Settings },
     ],
   },
   {
     label: 'Platform',
-    /**
-     * Visible only to platform staff.
-     *
-     * Hiding the link is presentation, not access control — every /admin route
-     * requires SUPER_ADMIN at the API, so a user who types the URL gets panels
-     * reporting 403 rather than data.
-     */
     superAdminOnly: true,
     items: [{ title: 'Administration', href: '/admin', icon: ShieldAlert }],
   },
-];
-
-export interface Workspace {
-  id: string;
-  name: string;
-  plan: string;
-}
-
-export const workspaces: Workspace[] = [
-  { id: 'acme-legal', name: 'Acme Legal LLP', plan: 'Professional' },
-  { id: 'harbor-counsel', name: 'Harbor Counsel', plan: 'Starter' },
-  { id: 'meridian-group', name: 'Meridian Group', plan: 'Enterprise' },
 ];

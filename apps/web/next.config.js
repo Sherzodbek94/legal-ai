@@ -23,8 +23,16 @@ const nextConfig = {
    * up to the workspace root and the standalone bundle is missing
    * `@legaltech/database` and the hoisted `node_modules` — which fails at
    * container start, not at build.
+   *
+   * Under `experimental` because this is Next 14; the key only moved to the top
+   * level in 15. Set at the top level here it was silently ignored — the build
+   * logged "Unrecognized key(s) in object: 'outputFileTracingRoot'" and traced
+   * from the app directory anyway, so the setting was documented but not in
+   * effect.
    */
-  outputFileTracingRoot: path.join(__dirname, '../../'),
+  experimental: {
+    outputFileTracingRoot: path.join(__dirname, '../../'),
+  },
 
   /** Removes the framework header; it advertises the stack for no benefit. */
   poweredByHeader: false,

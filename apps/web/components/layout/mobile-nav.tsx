@@ -13,7 +13,7 @@ import {
 import { SidebarBrand } from './sidebar-brand';
 import { SidebarNav } from './sidebar-nav';
 
-export function MobileNav() {
+export function MobileNav({ isSuperAdmin = false }: { isSuperAdmin?: boolean }) {
   const [open, setOpen] = React.useState(false);
 
   return (
@@ -40,7 +40,7 @@ export function MobileNav() {
         <div className="flex h-16 shrink-0 items-center border-b border-sidebar-border px-4">
           <SidebarBrand />
         </div>
-        <SidebarNav onNavigate={() => setOpen(false)} />
+        <SidebarNav onNavigate={() => setOpen(false)} isSuperAdmin={isSuperAdmin} />
       </SheetContent>
     </Sheet>
   );

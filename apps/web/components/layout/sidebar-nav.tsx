@@ -8,14 +8,27 @@ import { navSections } from '@/lib/navigation';
 interface SidebarNavProps {
   /** Invoked after a link is activated — lets the mobile sheet close itself. */
   onNavigate?: () => void;
+  /**
+   * Whether to render sections marked `superAdminOnly`.
+   *
+   * Presentation only. Every /admin route requires SUPER_ADMIN at the API, so a
+   * user who types the URL still gets refused — this just stops advertising a
+   * destination they cannot use. The flag existed before and was never read,
+   * which meant every user saw the Platform section.
+   */
+  isSuperAdmin?: boolean;
 }
 
-export function SidebarNav({ onNavigate }: SidebarNavProps) {
+export function SidebarNav({ onNavigate, isSuperAdmin = false }: SidebarNavProps) {
   const pathname = usePathname();
+
+  const sections = navSections.filter(
+    (section) => !section.superAdminOnly || isSuperAdmin,
+  );
 
   return (
     <nav aria-label="Main" className="flex-1 space-y-6 overflow-y-auto px-3 py-4">
-      {navSections.map((section) => {
+      {sections.map((section) => {
         const headingId = `nav-section-${section.label.toLowerCase()}`;
         return (
           <div key={section.label}>
