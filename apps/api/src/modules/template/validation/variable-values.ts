@@ -13,6 +13,7 @@
  * to render field-level errors, not just the first failure.
  */
 import { sanitizePromptValue } from '../../../common/prompt/sanitize-prompt-value';
+import { sanitizeDocumentValue } from '../../../common/text/sanitize-document-value';
 import {
   ABSOLUTE_MAX_LENGTH,
   type VariableDefinition,
@@ -200,6 +201,32 @@ function toPromptString(
     return value ? 'yes' : 'no';
   }
   return String(value);
+}
+
+/**
+ * Validated values rendered for substitution into a document body.
+ *
+ * Separate from `promptVariables` because the two have opposite requirements.
+ * A prompt value is stripped of the characters used to escape a delimited block;
+ * a document value must survive verbatim, since brackets and angle quotes are
+ * ordinary punctuation in a contract. Only the type-driven formatting — money to
+ * two decimal places, booleans to words — is shared.
+ */
+export function formatValuesForDocument(
+  schema: VariableSchema,
+  values: Record<string, VariableValue>,
+): Record<string, string> {
+  const rendered: Record<string, string> = {};
+
+  for (const definition of schema.variables) {
+    const value = values[definition.key];
+    if (value === undefined) continue;
+    rendered[definition.key] = sanitizeDocumentValue(
+      toPromptString(definition, value),
+    );
+  }
+
+  return rendered;
 }
 
 export function validateVariableValues(

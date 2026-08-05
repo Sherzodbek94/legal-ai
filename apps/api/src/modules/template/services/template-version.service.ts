@@ -13,6 +13,7 @@ import {
   type TemplateVersion,
 } from '@legaltech/database';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { collectPlaceholders } from '../../../common/template/placeholders';
 import {
   parseVariableSchema,
   VariableSchemaError,
@@ -199,8 +200,9 @@ export class TemplateVersionService {
       // Re-validate on the way out of draft. The schema was checked when the
       // draft was written, but a version becomes a contract with every document
       // generated from it, so it is worth confirming rather than assuming.
-      this.parseSchemaOrThrow(version.variableSchema);
+      const schema = this.parseSchemaOrThrow(version.variableSchema);
       this.parseChainOrThrow(version.approvalChain);
+      this.assertPlaceholdersDeclared(version.content, schema);
 
       const now = new Date();
 
@@ -409,6 +411,43 @@ export class TemplateVersionService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Refuses to publish a body whose placeholders the schema does not declare.
+   *
+   * An undeclared `{{key}}` can never be filled: value validation rejects keys
+   * the schema does not list, so every document generated from this version
+   * renders a blank line where that text belongs. The document still looks
+   * finished, which is how a contract reaches signature with its counterparty
+   * name missing.
+   *
+   * Enforced at publish rather than at draft: a work-in-progress body is
+   * expected to reference variables the author has not declared yet, and
+   * blocking that would make the editor unusable. Publishing is the point where
+   * the body becomes the text documents are generated from.
+   *
+   * The reverse case — a declared variable that appears nowhere in the body — is
+   * deliberately allowed. It only asks for information that goes unused, and
+   * bodies legitimately reference variables through attributes and conditional
+   * sections this check does not model.
+   */
+  private assertPlaceholdersDeclared(
+    content: unknown,
+    schema: VariableSchema,
+  ): void {
+    const declared = new Set(schema.variables.map((variable) => variable.key));
+    const undeclared = collectPlaceholders(content).filter(
+      (key) => !declared.has(key),
+    );
+
+    if (undeclared.length === 0) return;
+
+    throw new UnprocessableEntityException({
+      message:
+        'The template body references variables the schema does not declare; they could never be filled.',
+      undeclared,
+    });
   }
 
   private parseChainOrThrow(raw: unknown): ApprovalChain {
