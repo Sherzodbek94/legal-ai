@@ -82,6 +82,21 @@ export class OneIdService {
   }
 
   /**
+   * Whether this deployment holds OneID credentials.
+   *
+   * Read with `get` rather than the `getOrThrow` accessors above so asking the
+   * question is not itself an error — the sign-in page asks it on every render
+   * to decide whether to offer the button at all.
+   */
+  isConfigured(): boolean {
+    return Boolean(
+      this.config.get<string>('ONEID_CLIENT_ID') &&
+        this.config.get<string>('ONEID_CLIENT_SECRET') &&
+        this.config.get<string>('ONEID_REDIRECT_URI'),
+    );
+  }
+
+  /**
    * Builds the authorization URL and records a single-use `state`.
    *
    * `state` is stored server-side (Redis) rather than only round-tripped
@@ -120,6 +135,54 @@ export class OneIdService {
 
   private stateKey(state: string): string {
     return `oneid:state:${createHash('sha256').update(state).digest('hex')}`;
+  }
+
+  /**
+   * Holds a callback's `legalEntities` for the onboarding form to prefill.
+   *
+   * The callback is a browser redirect, not a fetch the frontend can read a
+   * body from, so this data cannot travel with it directly. Redis is used
+   * rather than a query param or an unencrypted cookie because these carry
+   * a citizen's STIR and legal-entity affiliations — not secret, but not
+   * something to put in a URL that ends up in server logs and browser
+   * history either.
+   */
+  private legalEntitiesKey(userId: string): string {
+    return `oneid:legal-entities:${userId}`;
+  }
+
+  /** Five minutes: long enough for the redirect to land and the onboarding
+   * page to load, short enough that a stale, unclaimed value does not
+   * linger. */
+  private static readonly LEGAL_ENTITIES_TTL_SECONDS = 300;
+
+  async cacheLegalEntities(
+    userId: string,
+    legalEntities: OneIdLegalEntity[],
+  ): Promise<void> {
+    if (legalEntities.length === 0) return;
+    await this.redis.client.set(
+      this.legalEntitiesKey(userId),
+      JSON.stringify(legalEntities),
+      'EX',
+      OneIdService.LEGAL_ENTITIES_TTL_SECONDS,
+    );
+  }
+
+  /** Reads and deletes: the onboarding page gets one shot at the prefill. */
+  async consumeLegalEntities(userId: string): Promise<OneIdLegalEntity[]> {
+    const key = this.legalEntitiesKey(userId);
+    const raw = await this.redis.client.get(key);
+    if (!raw) return [];
+
+    await this.redis.client.del(key);
+
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as OneIdLegalEntity[]) : [];
+    } catch {
+      return [];
+    }
   }
 
   /**

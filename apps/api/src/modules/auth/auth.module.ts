@@ -8,13 +8,16 @@ import { AuthService } from './auth.service';
 import { TokenService } from './services/token.service';
 import { OtpService } from './services/otp.service';
 import { OneIdService } from './services/oneid.service';
+import { GoogleOAuthService } from './services/google-oauth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { RolesGuard } from './guards/roles.guard';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { CompanyModule } from '../company/company.module';
 
 @Module({
   imports: [
     ConfigModule,
+    CompanyModule,
     PassportModule.register({ defaultStrategy: 'jwt', session: false }),
     HttpModule.register({ timeout: 10_000, maxRedirects: 0 }),
     JwtModule.registerAsync({
@@ -39,6 +42,7 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
     TokenService,
     OtpService,
     OneIdService,
+    GoogleOAuthService,
     JwtStrategy,
     JwtAuthGuard,
     RolesGuard,

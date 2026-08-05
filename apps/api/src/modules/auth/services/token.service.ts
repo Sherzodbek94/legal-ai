@@ -133,7 +133,7 @@ export class TokenService {
     const membership = stored.user.memberships[0];
     const payload: JwtPayload = {
       sub: stored.user.id,
-      email: stored.user.email,
+      email: stored.user.email ?? undefined,
       role: stored.user.role,
       companyId: membership?.companyId,
       companyRole: membership?.role,

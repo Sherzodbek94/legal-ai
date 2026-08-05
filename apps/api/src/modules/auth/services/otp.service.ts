@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { createHash, randomInt, timingSafeEqual } from 'node:crypto';
 import { TooManyRequestsException } from '../../../common/exceptions/too-many-requests.exception';
 import { RedisService } from '../../../redis/redis.service';
+import { EskizSmsService } from '../../notification/providers/eskiz-sms.service';
 
 export interface OtpChallenge {
   /** Seconds until the code expires. */
@@ -18,6 +19,7 @@ export class OtpService {
   constructor(
     private readonly redis: RedisService,
     private readonly config: ConfigService,
+    private readonly sms: EskizSmsService,
   ) {}
 
   private get codeLength(): number {
@@ -51,7 +53,15 @@ export class OtpService {
     return `otp:${prefix}:${digest}`;
   }
 
-  private normalizePhone(phone: string): string {
+  /**
+   * Public because `User.phone` is stored in exactly this form.
+   *
+   * The number is a login identifier and is unique, so the value written at
+   * registration and the value looked up at sign-in have to be produced by the
+   * same function — `+998 90 123-45-67` and `+998901234567` are one account,
+   * and two normalisations would make them two.
+   */
+  normalizePhone(phone: string): string {
     return phone.replace(/[^\d+]/g, '');
   }
 
@@ -149,21 +159,63 @@ export class OtpService {
   }
 
   /**
-   * Hands the code to the SMS provider.
+   * Whether requesting a code can actually result in one arriving.
    *
-   * NOT IMPLEMENTED — no gateway is wired up yet. In non-production the code is
-   * logged so the flow is testable; in production this throws rather than
-   * silently reporting success for a message that was never sent.
+   * Mirrors `deliver` exactly: an SMS gateway, or a non-production build where
+   * the code goes to the log instead. The sign-in page asks this to decide
+   * whether to offer phone sign-in — offering it on a production deployment
+   * with no gateway would send the user to a code box for a message that
+   * `deliver` is about to refuse to send.
+   */
+  isAvailable(): boolean {
+    return (
+      this.sms.isConfigured() || this.config.get<string>('NODE_ENV') !== 'production'
+    );
+  }
+
+  /**
+   * Sends the code, or refuses to have issued one.
+   *
+   * Eskiz when it is configured; a log line otherwise, and only outside
+   * production. The refusal matters more than the send: an OTP that was
+   * generated but never delivered leaves the user staring at a code entry box
+   * for a message that is not coming, and no error anywhere.
    */
   private async deliver(phone: string, code: string): Promise<void> {
+    if (this.sms.isConfigured()) {
+      try {
+        // `send` throws a DeliveryError rather than returning a status — an
+        // invalid number is permanent and billable, so it must not be retried.
+        await this.sms.send(
+          phone,
+          `LegalTech AI: ${code}. Kod ${Math.round(this.ttlSeconds / 60)} daqiqa amal qiladi. Hech kimga aytmang.`,
+        );
+      } catch (error) {
+        this.logger.error(
+          `OTP delivery failed for ${maskPhone(phone)}: ${(error as Error)?.message ?? 'unknown error'}`,
+        );
+        // The provider's own wording is not surfaced: it can name the account
+        // and the sender id. The user only needs to know it did not send.
+        throw new BadRequestException(
+          'Could not send the code. Check the number and try again.',
+        );
+      }
+      return;
+    }
+
     if (this.config.get<string>('NODE_ENV') === 'production') {
       throw new Error(
         'No SMS provider configured: refusing to issue an OTP that cannot be delivered',
       );
     }
 
-    this.logger.debug(
-      `[dev] OTP for ${this.normalizePhone(phone).slice(-4).padStart(8, '*')}: ${code}`,
-    );
+    // Deliberately `warn`, not `debug`: a code in the log is how local
+    // development works here, and it should be obvious that is what happened.
+    this.logger.warn(`[dev] OTP for ${maskPhone(phone)}: ${code}`);
   }
+}
+
+/** Last four digits only — the rest never reaches a log. */
+function maskPhone(phone: string): string {
+  return phone.slice(-4).padStart(8, '*');
 }

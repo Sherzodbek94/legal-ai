@@ -4,7 +4,14 @@ import type { CompanyMemberRole, UserRole } from '@legaltech/database';
 export interface JwtPayload {
   /** User id (RFC 7519 `sub`). */
   sub: string;
-  email: string;
+  /**
+   * Absent for an account created from a phone number alone — SMS sign-in
+   * provisions one without an address, and inventing a placeholder here would
+   * put a fake value in front of the user and in every audit entry.
+   */
+  email?: string;
+  /** E.164, present when the account signed up or signed in by phone. */
+  phone?: string;
   /** Platform-wide role. */
   role: UserRole;
   /** Active tenant, when the session is scoped to one. */
@@ -27,7 +34,7 @@ export interface JwtPayload {
   act?: {
     /** The SUPER_ADMIN performing the impersonation. */
     sub: string;
-    email: string;
+    email?: string;
   };
   /** Id of the ImpersonationSession row this token is bound to. */
   impersonationId?: string;
@@ -36,7 +43,8 @@ export interface JwtPayload {
 /** Shape attached to `request.user` once JwtStrategy has validated a request. */
 export interface AuthenticatedUser {
   id: string;
-  email: string;
+  email?: string;
+  phone?: string;
   role: UserRole;
   companyId?: string;
   companyRole?: CompanyMemberRole;
@@ -51,7 +59,7 @@ export interface AuthenticatedUser {
   impersonation?: {
     sessionId: string;
     impersonatorId: string;
-    impersonatorEmail: string;
+    impersonatorEmail?: string;
   };
 }
 

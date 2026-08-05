@@ -68,3 +68,6 @@ export class OneIdCallbackDto {
   @MaxLength(512)
   state!: string;
 }
+
+/** Identical shape; named separately so the two callbacks stay independent. */
+export class OAuthCallbackDto extends OneIdCallbackDto {}
