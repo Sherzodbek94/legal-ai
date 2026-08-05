@@ -68,7 +68,7 @@ data:
   OPENAI_MODEL: "gpt-4o"
 
   # --- Notifications ---------------------------------------------------------
-  ESKIZ_BASE_URL: "https://notify.eskiz.uz/api"
+  DEVSMS_BASE_URL: "https://devsms.uz/api"
   EMAIL_FROM: "LegalTech <no-reply@legaltech.example.com>"
 
   # --- Payments --------------------------------------------------------------

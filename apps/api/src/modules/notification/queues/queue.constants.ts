@@ -4,8 +4,8 @@ import type { NotificationChannel } from '@legaltech/database';
 /**
  * One queue per channel, not one queue for all notifications.
  *
- * The channels fail differently and at different rates: Eskiz enforces its own
- * throughput limits, Telegram allows one message per second per chat, and SMTP
+ * The channels fail differently and at different rates: the SMS gateway enforces
+ * its own throughput limits, Telegram allows one message per second per chat, and SMTP
  * connections are slow to establish. Sharing a queue means a stalled SMS provider
  * holds up every email behind it — and the emails are usually the ones carrying
  * the deadline.
@@ -73,7 +73,7 @@ export const WORKER_LIMITS: Record<
     concurrency: 5,
     limiter: { max: 100, duration: 60_000 },
   },
-  // Eskiz publishes no hard figure; this is deliberately conservative because
+  // DevSMS publishes no hard figure; this is deliberately conservative because
   // exceeding it gets an account throttled rather than individual messages
   // rejected, which is much harder to notice.
   [QUEUE_NAMES.SMS]: {

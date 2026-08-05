@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { createHash, randomInt, timingSafeEqual } from 'node:crypto';
 import { TooManyRequestsException } from '../../../common/exceptions/too-many-requests.exception';
 import { RedisService } from '../../../redis/redis.service';
-import { EskizSmsService } from '../../notification/providers/eskiz-sms.service';
+import { DevSmsService } from '../../notification/providers/devsms.service';
 
 export interface OtpChallenge {
   /** Seconds until the code expires. */
@@ -19,7 +19,7 @@ export class OtpService {
   constructor(
     private readonly redis: RedisService,
     private readonly config: ConfigService,
-    private readonly sms: EskizSmsService,
+    private readonly sms: DevSmsService,
   ) {}
 
   private get codeLength(): number {
@@ -176,7 +176,7 @@ export class OtpService {
   /**
    * Sends the code, or refuses to have issued one.
    *
-   * Eskiz when it is configured; a log line otherwise, and only outside
+   * DevSMS when it is configured; a log line otherwise, and only outside
    * production. The refusal matters more than the send: an OTP that was
    * generated but never delivered leaves the user staring at a code entry box
    * for a message that is not coming, and no error anywhere.

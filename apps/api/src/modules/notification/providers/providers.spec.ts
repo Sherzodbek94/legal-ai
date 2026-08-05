@@ -12,7 +12,7 @@ import {
   classifyHttpStatus,
   parseRetryAfter,
 } from './delivery-error';
-import { normalizeUzbekPhone } from './eskiz-sms.service';
+import { normalizeUzbekPhone } from './devsms.service';
 import { classifyTelegramError, formatMessage } from './telegram.service';
 import { classifySmtpError, toHtml } from './email.service';
 

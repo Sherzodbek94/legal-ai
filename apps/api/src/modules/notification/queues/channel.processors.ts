@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Processor } from '@nestjs/bullmq';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { EmailService } from '../providers/email.service';
-import { EskizSmsService } from '../providers/eskiz-sms.service';
+import { DevSmsService } from '../providers/devsms.service';
 import { TelegramService } from '../providers/telegram.service';
 import {
   BaseNotificationProcessor,
@@ -42,7 +42,7 @@ export class EmailProcessor extends BaseNotificationProcessor {
  * SMS worker.
  *
  * The tightest limits of the three, for two reasons: every attempt is billable, and
- * Eskiz responds to sustained excess by throttling the account rather than
+ * an SMS gateway responds to sustained excess by throttling the account rather than
  * rejecting individual messages — which is much harder to notice than an error.
  */
 @Injectable()
@@ -55,7 +55,7 @@ export class SmsProcessor extends BaseNotificationProcessor {
 
   constructor(
     prisma: PrismaService,
-    private readonly sms: EskizSmsService,
+    private readonly sms: DevSmsService,
   ) {
     super(prisma);
   }

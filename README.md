@@ -80,7 +80,7 @@ a method that was never on offer.
 | Method | Configured by | Identity bound to |
 | --- | --- | --- |
 | Password | always available | `User.email` |
-| SMS code | `ESKIZ_*` | `User.phone`, unique and verified |
+| SMS code | `DEVSMS_TOKEN` | `User.phone`, unique and verified |
 | Google | `GOOGLE_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` | `User.googleSubject` |
 | OneID | `ONEID_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` | `User.oneIdSubject` |
 
@@ -437,7 +437,7 @@ Registered globally in `app.module.ts`, and the order is deliberate:
 | `ocr-search`  | Tesseract (Uzbek Latin/Cyrillic + Russian), hybrid vector + FTS search |
 | `billing`     | Plans, quota enforcement, coupons, renewal crons                      |
 | `payment`     | Click, Payme, Uzum, Stripe — idempotent webhooks                      |
-| `notification`| BullMQ queues → Eskiz SMS, Telegram, email, in-app WebSocket          |
+| `notification`| BullMQ queues → DevSMS, Telegram, email, in-app WebSocket             |
 | `admin`       | MRR/ARR, account locking, AI cost tracking, audited impersonation     |
 | `health`      | Terminus probes, Prometheus metrics, graceful shutdown                |
 

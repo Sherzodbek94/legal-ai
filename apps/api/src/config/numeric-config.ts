@@ -20,7 +20,7 @@
  *     grep -rho "get<number>('[A-Z_0-9]*'" apps/api/src | sort -u
  *
  * Coercion is by explicit key rather than "anything that looks like a number",
- * because settings that are legitimately digit-strings exist — `ESKIZ_FROM` is
+ * because settings that are legitimately digit-strings exist — `DEVSMS_FROM` is
  * an SMS sender id of `4546`, and turning that into an integer would be wrong.
  */
 const NUMERIC_KEYS = [

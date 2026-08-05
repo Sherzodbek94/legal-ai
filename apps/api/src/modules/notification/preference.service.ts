@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { NotificationChannel } from '@legaltech/database';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../redis/redis.service';
-import { normalizeUzbekPhone } from './providers/eskiz-sms.service';
+import { normalizeUzbekPhone } from './providers/devsms.service';
 import type { UpdatePreferencesDto } from './dto/notification.dto';
 
 @Injectable()

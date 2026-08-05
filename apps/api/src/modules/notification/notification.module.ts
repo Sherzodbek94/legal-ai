@@ -7,7 +7,7 @@ import { NotificationService } from './notification.service';
 import { PreferenceService } from './preference.service';
 import { NotificationGateway } from './gateway/notification.gateway';
 import { EmailService } from './providers/email.service';
-import { EskizSmsService } from './providers/eskiz-sms.service';
+import { DevSmsService } from './providers/devsms.service';
 import { TelegramService } from './providers/telegram.service';
 import {
   EmailProcessor,
@@ -69,13 +69,13 @@ import { AuthModule } from '../auth/auth.module';
     PreferenceService,
     NotificationGateway,
     EmailService,
-    EskizSmsService,
+    DevSmsService,
     TelegramService,
     EmailProcessor,
     SmsProcessor,
     TelegramProcessor,
   ],
-  // EskizSmsService is exported for AuthModule's OtpService, which sends the
+  // DevSmsService is exported for AuthModule's OtpService, which sends the
   // sign-in code directly rather than through the notification queue — a login
   // code that arrives after a retry backoff is a code that has already expired.
   // Exported rather than imported the other way round because NotificationModule
@@ -85,7 +85,7 @@ import { AuthModule } from '../auth/auth.module';
     NotificationService,
     PreferenceService,
     NotificationGateway,
-    EskizSmsService,
+    DevSmsService,
   ],
 })
 export class NotificationModule {}

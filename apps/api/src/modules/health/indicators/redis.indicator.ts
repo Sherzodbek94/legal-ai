@@ -6,9 +6,9 @@ import { RedisService } from '../../../redis/redis.service';
  * Redis reachability.
  *
  * Redis is not optional for this service: OTP challenges, the OneID CSRF state,
- * the Eskiz token cache, the Socket.IO adapter, and every BullMQ queue depend on
- * it. A pod that cannot reach Redis can still serve reads, but it cannot log
- * anyone in — so it belongs out of the load balancer rather than half-working.
+ * the Socket.IO adapter, and every BullMQ queue depend on it. A pod that cannot
+ * reach Redis can still serve reads, but it cannot log anyone in — so it belongs
+ * out of the load balancer rather than half-working.
  */
 @Injectable()
 export class RedisHealthIndicator {
