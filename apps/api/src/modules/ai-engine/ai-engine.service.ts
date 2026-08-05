@@ -16,9 +16,23 @@ import {
   type LlmProviderName,
 } from './providers/llm-provider.interface';
 import { AiCostService } from '../admin/analytics/ai-cost.service';
+import { redactPii, restorePii } from '../../common/pii/pii-redactor';
 import { buildLegalSystemPrompt } from './prompts/legal-system-prompt';
 import { LEGAL_DOCUMENT_JSON_SCHEMA } from './schemas/legal-document.schema';
+import {
+  LEGAL_TEMPLATE_JSON_SCHEMA,
+  type LegalTemplateDraft,
+} from './schemas/legal-template.schema';
+import { buildTemplateSystemPrompt } from './prompts/legal-template-prompt';
+import {
+  templateDraftToContent,
+  templateDraftToSchema,
+  validateTemplateDraft,
+  type TemplateDraftIssues,
+} from './parsers/template-draft.validator';
 import { parseLegalDocument } from './parsers/legal-document.parser';
+import { extractJson } from './parsers/json-extraction';
+import { sanitizePromptValue } from '../../common/prompt/sanitize-prompt-value';
 import type { LegalDocumentDraft } from './schemas/legal-document.schema';
 
 export interface GenerateDocumentInput {
@@ -30,6 +44,32 @@ export interface GenerateDocumentInput {
   /** Attribution for cost tracking; absent for internal calls. */
   companyId?: string;
   userId?: string;
+}
+
+export interface DraftTemplateInput {
+  locale: LegalLocale;
+  /** What kind of document, e.g. "tovar yetkazib berish shartnomasi". */
+  documentType: string;
+  /** BCP 47 for the text itself: `uz-Latn`, `uz-Cyrl`, `ru`. */
+  language: string;
+  /** Free-text requirements from the person requesting the template. */
+  description?: string;
+  /** Clauses the requester insists on. */
+  mustInclude?: string[];
+  companyId?: string;
+  userId?: string;
+}
+
+export interface DraftTemplateOutput {
+  draft: LegalTemplateDraft;
+  /** Editor JSON, ready for a template version. */
+  content: unknown;
+  variableSchema: unknown;
+  /** Disagreements between the text and the declared variables. */
+  issues: TemplateDraftIssues;
+  provider: LlmProviderName;
+  model: string;
+  usage?: GenerationResult['usage'];
 }
 
 export interface GenerateDocumentOutput {
@@ -88,12 +128,53 @@ export class AiEngineService {
     });
   }
 
+  /**
+   * Whether identifiers are stripped before a prompt leaves this process.
+   *
+   * On unless explicitly disabled. A deployment that genuinely needs the model
+   * to see raw identifiers has to say so, rather than a deployment that wants
+   * them protected having to remember to ask.
+   */
+  private get redactionEnabled(): boolean {
+    return this.config.get<string>('AI_REDACT_PII', 'true') !== 'false';
+  }
+
   async generateLegalDocument(
     input: GenerateDocumentInput,
   ): Promise<GenerateDocumentOutput> {
+    const userPrompt = this.buildUserPrompt(input);
+
+    /*
+     * Identifiers are replaced with placeholders before the prompt leaves this
+     * process, and put back into the answer when it returns.
+     *
+     * The prompt carries whatever the template variables held — routinely a
+     * counterparty's settlement account, a director's passport number, a
+     * client's phone. None of it changes how the model drafts a clause: the
+     * wording is the same whether the account number is real or
+     * `[BANK_ACCOUNT_1]`. Sending it is a disclosure to a third-party processor
+     * that buys nothing.
+     *
+     * Placeholders rather than deletion, because the model still has to write
+     * the value back where it belongs. `legal-system-prompt.ts` already forbids
+     * inventing registry numbers in words; this makes it structurally
+     * unnecessary for the model to try.
+     */
+    const { text: redactedPrompt, redactions } = this.redactionEnabled
+      ? redactPii(userPrompt)
+      : { text: userPrompt, redactions: [] };
+
+    if (redactions.length > 0) {
+      // Masked forms only — this line goes to the log.
+      this.logger.log(
+        `Redacted ${redactions.length} identifier(s) before generation: ` +
+          redactions.map((r) => `${r.kind} ${r.masked}`).join(', '),
+      );
+    }
+
     const request: GenerationRequest = {
       systemPrompt: buildLegalSystemPrompt(input.locale),
-      userPrompt: this.buildUserPrompt(input),
+      userPrompt: redactedPrompt,
       jsonSchema: LEGAL_DOCUMENT_JSON_SCHEMA,
       temperature: this.temperature,
       maxTokens: this.config.get<number>('AI_MAX_TOKENS', 8192),
@@ -114,7 +195,17 @@ export class AiEngineService {
       userId: input.userId,
     });
 
-    const parsed = parseLegalDocument(result.text);
+    // Restored before parsing, not after: the answer is JSON, and putting the
+    // values back into the raw text means every string field downstream —
+    // clauses, party blocks, the title — carries the real identifier without
+    // anything having to walk the parsed object looking for placeholders.
+    //
+    // Safe against the JSON: every identifier this detects is digits, letters,
+    // `@`, `+`, or spaces, none of which can terminate a JSON string.
+    const restored =
+      redactions.length > 0 ? restorePii(result.text, userPrompt) : result.text;
+
+    const parsed = parseLegalDocument(restored);
 
     if (!parsed.ok) {
       this.logger.error(
@@ -134,6 +225,149 @@ export class AiEngineService {
       repaired: parsed.repaired,
       usage: result.usage,
     };
+  }
+
+
+  /**
+   * Drafts a reusable template.
+   *
+   * Distinct from `generateLegalDocument`, which produces finished text. This
+   * produces text with `{{placeholders}}` in it *and* the variable declarations
+   * that fill them — both halves in one answer, because asking for a document
+   * and hunting for the variable-shaped parts afterwards does not work: the
+   * model invents a party name and nothing downstream can tell it was meant to
+   * be a placeholder.
+   *
+   * No PII redaction here, unlike document generation: the input is a
+   * description of a document type, not a party's details, and a template that
+   * carried real identifiers would be the bug rather than the leak.
+   */
+  async draftTemplate(input: DraftTemplateInput): Promise<DraftTemplateOutput> {
+    const request: GenerationRequest = {
+      systemPrompt: buildTemplateSystemPrompt(input.locale),
+      userPrompt: this.buildTemplateUserPrompt(input),
+      jsonSchema: LEGAL_TEMPLATE_JSON_SCHEMA,
+      temperature: this.temperature,
+      maxTokens: this.config.get<number>('AI_MAX_TOKENS', 8192),
+    };
+
+    const result = await this.runWithFallback(request);
+
+    await this.aiCosts.record({
+      provider: result.provider,
+      model: result.model,
+      operation: 'template_drafting',
+      inputTokens: result.usage?.inputTokens ?? 0,
+      outputTokens: result.usage?.outputTokens ?? 0,
+      companyId: input.companyId,
+      userId: input.userId,
+    });
+
+    // The same extractor the document parser uses: it strips code fences,
+    // finds the first balanced JSON value, and repairs trailing commas — all of
+    // which models still emit despite strict schema mode.
+    const extracted = extractJson<LegalTemplateDraft>(result.text);
+
+    if (!extracted.ok) {
+      this.logger.error(
+        `Failed to parse ${result.provider} template draft: ${extracted.error} — ${extracted.detail}`,
+      );
+      throw new UnprocessableEntityException(
+        'The model returned an unusable template draft',
+      );
+    }
+
+    const draft = extracted.value;
+
+    if (!Array.isArray(draft?.sections) || !Array.isArray(draft?.variables)) {
+      throw new UnprocessableEntityException(
+        'The model returned an unusable template draft',
+      );
+    }
+
+    const issues = validateTemplateDraft(draft);
+
+    if (issues.undeclared.length > 0) {
+      // Logged, not thrown. The draft is a proposal for a human to review, and
+      // an undeclared placeholder is visible in the builder — losing an
+      // otherwise good draft over one would be the worse outcome.
+      this.logger.warn(
+        `Template draft used undeclared variables: ${issues.undeclared.join(', ')}`,
+      );
+    }
+
+    return {
+      draft,
+      content: templateDraftToContent(draft),
+      variableSchema: templateDraftToSchema(draft.variables),
+      issues,
+      provider: result.provider,
+      model: result.model,
+      usage: result.usage,
+    };
+  }
+
+  private buildTemplateUserPrompt(input: DraftTemplateInput): string {
+    const lines = [
+      `Hujjat turi: ${sanitizePromptValue(input.documentType, 200)}`,
+      `Til: ${input.language}`,
+    ];
+
+    if (input.description) {
+      lines.push(
+        `Qo'shimcha talablar: ${sanitizePromptValue(input.description, 2000)}`,
+      );
+    }
+
+    if (input.mustInclude?.length) {
+      lines.push(
+        `Albatta bo'lishi kerak: ${input.mustInclude
+          .map((item) => sanitizePromptValue(item, 200))
+          .join('; ')}`,
+      );
+    }
+
+    return lines.join('\n');
+  }
+
+
+  /**
+   * A free-text answer, for the legal chat.
+   *
+   * No JSON schema and no parser, unlike the other two entry points: a chat
+   * answer is prose with `[S1]` markers in it, and forcing it through a schema
+   * would buy nothing while costing the model the room to explain itself.
+   *
+   * The caller does the grounding — building the sources block, redacting, and
+   * checking the citations — because those are chat concerns. This method's job
+   * is the provider chain, the fallback, and the cost record.
+   */
+  async answerLegalQuestion(input: {
+    systemPrompt: string;
+    userPrompt: string;
+    companyId?: string;
+    userId?: string;
+  }): Promise<{ text: string; provider: LlmProviderName; model: string }> {
+    const result = await this.runWithFallback({
+      systemPrompt: input.systemPrompt,
+      userPrompt: input.userPrompt,
+      temperature: this.temperature,
+      // Shorter than a document draft. An answer that runs past this is not
+      // being thorough, it is repeating the sources back.
+      maxTokens: this.config.get<number>('AI_CHAT_MAX_TOKENS', 2048),
+    });
+
+    await this.aiCosts.record({
+      provider: result.provider,
+      model: result.model,
+      operation: 'legal_chat',
+      inputTokens: result.usage?.inputTokens ?? 0,
+      outputTokens: result.usage?.outputTokens ?? 0,
+      companyId: input.companyId,
+      userId: input.userId,
+    });
+
+    return { text: result.text, provider: result.provider, model: result.model };
   }
 
   /**
@@ -190,15 +424,24 @@ export class AiEngineService {
         this.logger.error(`Provider ${provider.name} failed: ${failure.message}`);
 
         if (!failure.retryable) {
+          // The vendor's own text is logged above and deliberately NOT sent on.
+          // It carries their request id, their account state, and which vendor
+          // this deployment uses — none of which the caller can act on, and the
+          // authentication case ("invalid x-api-key") reads to a user as though
+          // *they* did something wrong. A 401 from the vendor is a deployment
+          // fault; a 400 is a prompt fault. Neither is the user's.
           throw new UnprocessableEntityException(
-            `AI request rejected: ${failure.message}`,
+            isCredentialFailure(failure.message)
+              ? 'AI drafting is unavailable on this deployment. Contact your administrator.'
+              : 'The AI provider rejected this request.',
           );
         }
       }
     }
 
+    // Same reasoning: the joined failure list is vendor text.
     throw new ServiceUnavailableException(
-      `All AI providers failed. ${failures.join(' | ')}`,
+      'No AI provider could be reached. Try again shortly.',
     );
   }
 
@@ -227,4 +470,18 @@ export class AiEngineService {
       '</request_data>',
     ].join('\n');
   }
+}
+
+/**
+ * Whether a provider rejection is about *our* credentials.
+ *
+ * Separated because the two cases need different words. A bad key is a
+ * deployment fault the user can only report; a rejected prompt is a fault in
+ * the request. Telling a lawyer "invalid x-api-key" invites them to go looking
+ * for something they did wrong.
+ */
+function isCredentialFailure(message: string): boolean {
+  return /401|403|api[-_ ]?key|authentication|unauthorized|credential/i.test(
+    message,
+  );
 }
