@@ -10,10 +10,16 @@ import type { NotificationChannel } from '@legaltech/database';
  * holds up every email behind it — and the emails are usually the ones carrying
  * the deadline.
  */
+/**
+ * Hyphen-separated, not colon-separated. BullMQ uses `:` to build its own Redis
+ * key structure (`bull:<queue>:<id>`) and rejects a queue name containing one
+ * outright — "Queue name cannot contain :", thrown at module init, so the API
+ * does not boot at all.
+ */
 export const QUEUE_NAMES = {
-  EMAIL: 'notifications:email',
-  SMS: 'notifications:sms',
-  TELEGRAM: 'notifications:telegram',
+  EMAIL: 'notifications-email',
+  SMS: 'notifications-sms',
+  TELEGRAM: 'notifications-telegram',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];

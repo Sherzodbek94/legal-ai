@@ -170,6 +170,18 @@ export class SubscriptionService {
       `Company ${companyId} redeemed ${result.code} for ${result.discountCents} cents`,
     );
 
+    // Redemption happens inside CouponService's own transaction, so this is
+    // written separately rather than atomically with it — every other
+    // subscription-affecting action in this file leaves an audit entry, and a
+    // discount applied to a company's bill should be no different.
+    await this.writeAudit(
+      this.prisma.client,
+      companyId,
+      user.id,
+      'COUPON_APPLIED',
+      { code: result.code, discountCents: result.discountCents },
+    );
+
     return result;
   }
 

@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -7,6 +8,7 @@ import { WinstonModule } from 'nest-winston';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { winstonConfig } from './common/logger/winston.config';
+import { numericConfig } from './config/numeric-config';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
@@ -15,9 +17,11 @@ import { AuthModule } from './modules/auth/auth.module';
 import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
 import { RolesGuard } from './modules/auth/guards/roles.guard';
 import { CompanyModule } from './modules/company/company.module';
+import { CounterpartyModule } from './modules/counterparty/counterparty.module';
+import { LegalCorpusModule } from './modules/legal-corpus/legal-corpus.module';
+import { ChatModule } from './modules/chat/chat.module';
 import { TemplateModule } from './modules/template/template.module';
 import { DocumentModule } from './modules/document/document.module';
-import { AiModule } from './modules/ai/ai.module';
 import { AiEngineModule } from './modules/ai-engine/ai-engine.module';
 import { BillingModule } from './modules/billing/billing.module';
 import { PaymentModule } from './modules/payment/payment.module';
@@ -34,6 +38,25 @@ import { NotificationModule } from './modules/notification/notification.module';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      /**
+       * The repository root `.env` first, then a local one.
+       *
+       * Without this the API only ever finds `apps/api/.env`: `@nestjs/config`
+       * resolves a bare `.env` against the process CWD, and both `npm run dev`
+       * (through Turborepo) and `node dist/main` run with the CWD set to
+       * `apps/api`. The root `.env` this repo actually documents was never
+       * read, so a correctly configured checkout still died at boot with
+       * "JWT_ACCESS_SECRET is not configured".
+       *
+       * Order matters — earlier files win — so a developer can still drop an
+       * `apps/api/.env` to override a single value locally without editing the
+       * shared one. In production nothing is read from a file at all: the
+       * Kubernetes deployment injects real values as environment variables,
+       * which take precedence over both.
+       */
+      envFilePath: [join(__dirname, '../../../.env'), '.env'],
+      // Turns the numeric settings into actual numbers — see numericConfig.
+      load: [numericConfig],
     }),
     WinstonModule.forRoot(winstonConfig),
     // Starts the @Cron handlers registered by RenewalService.
@@ -41,13 +64,51 @@ import { NotificationModule } from './modules/notification/notification.module';
     ThrottlerModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => [
-        {
-          name: 'default',
-          ttl: config.get<number>('THROTTLE_TTL', 60000),
-          limit: config.get<number>('THROTTLE_LIMIT', 100),
+      useFactory: (config: ConfigService) => ({
+        throttlers: [
+          {
+            name: 'default',
+            ttl: config.get<number>('THROTTLE_TTL', 60000),
+            limit: config.get<number>('THROTTLE_LIMIT', 100),
+          },
+        ],
+        /**
+         * Off under test.
+         *
+         * The e2e suite drives the real application over HTTP and signs in
+         * repeatedly — every tenant-isolation case creates two companies and
+         * logs both in. Against the production limits (`@Throttle` caps login
+         * at 5/minute, deliberately, because it guards a password) the suite
+         * rate-limits *itself*: 29 of 47 cases failed on `429 Too Many
+         * Requests` rather than on anything they were written to check.
+         *
+         * Raising `THROTTLE_LIMIT` would not have helped — the per-route
+         * `@Throttle` decorators override the global figure — so the skip has
+         * to happen at the guard.
+         *
+         * Two ways in, both refused outright in production:
+         *
+         *   NODE_ENV=test         set by `test/global-setup.ts`.
+         *   THROTTLE_DISABLED     an explicit local switch, for the Playwright
+         *                         suite — it drives the *dev* server over HTTP,
+         *                         where NODE_ENV is `development`, and hits the
+         *                         same 429 wall.
+         *
+         * The `NODE_ENV !== 'production'` guard is what makes the second one
+         * safe: a stray `THROTTLE_DISABLED=true` in a production environment
+         * cannot switch off rate limiting on a password endpoint.
+         *
+         * The throttler's own behaviour is covered separately by unit tests
+         * that assert the guard's decisions directly.
+         */
+        skipIf: () => {
+          if (process.env.NODE_ENV === 'production') return false;
+          return (
+            process.env.NODE_ENV === 'test' ||
+            process.env.THROTTLE_DISABLED === 'true'
+          );
         },
-      ],
+      }),
     }),
     PrismaModule,
     RedisModule,
@@ -57,14 +118,16 @@ import { NotificationModule } from './modules/notification/notification.module';
     StorageModule,
     AuthModule,
     CompanyModule,
+    CounterpartyModule,
     TemplateModule,
     DocumentModule,
-    AiModule,
     AiEngineModule,
     BillingModule,
     PaymentModule,
     AdminModule,
     OcrSearchModule,
+    LegalCorpusModule,
+    ChatModule,
     NotificationModule,
   ],
   controllers: [AppController],

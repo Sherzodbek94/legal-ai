@@ -9,12 +9,7 @@
 import { ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
-import {
-  HealthCheckService,
-  HealthIndicatorService,
-  MemoryHealthIndicator,
-  TerminusModule,
-} from '@nestjs/terminus';
+import { TerminusModule } from '@nestjs/terminus';
 import { HealthController } from './health.controller';
 import { PrismaHealthIndicator } from './indicators/prisma.indicator';
 import { RedisHealthIndicator } from './indicators/redis.indicator';

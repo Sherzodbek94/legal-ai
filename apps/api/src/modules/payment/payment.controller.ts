@@ -46,7 +46,9 @@ export class PaymentController {
     return this.orders.findOne(id, user.companyId!);
   }
 
+  // Cancelling is a money-write action too; not reachable while impersonating.
   @Roles('OWNER')
+  @NoImpersonation('payment:write')
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   cancel(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {

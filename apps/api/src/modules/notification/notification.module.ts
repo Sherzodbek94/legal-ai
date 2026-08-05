@@ -75,6 +75,17 @@ import { AuthModule } from '../auth/auth.module';
     SmsProcessor,
     TelegramProcessor,
   ],
-  exports: [NotificationService, PreferenceService, NotificationGateway],
+  // EskizSmsService is exported for AuthModule's OtpService, which sends the
+  // sign-in code directly rather than through the notification queue — a login
+  // code that arrives after a retry backoff is a code that has already expired.
+  // Exported rather than imported the other way round because NotificationModule
+  // already imports AuthModule for the websocket handshake, and this module is
+  // @Global, so the export reaches AuthModule without a forwardRef cycle.
+  exports: [
+    NotificationService,
+    PreferenceService,
+    NotificationGateway,
+    EskizSmsService,
+  ],
 })
 export class NotificationModule {}

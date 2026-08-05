@@ -14,6 +14,7 @@ import {
   type QuotaRequirement,
 } from './plan-limit.decorator';
 import { effectivePlan, hasFeature } from './quota-policy';
+import { quotaRefusal } from './quota-refusal';
 import type { PlanDefinition } from '../plans/plan-catalog';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
 
@@ -118,17 +119,9 @@ export class PlanLimitGuard implements CanActivate {
         `Blocked ${quota.metric} for company ${companyId}: ${decision.reason}`,
       );
 
-      // 403 rather than 429: this is not rate limiting and will not resolve by
-      // retrying later in the period. The body carries what the client needs to
-      // show a useful upgrade prompt.
-      throw new ForbiddenException({
-        message: decision.message ?? 'Plan limit reached',
-        reason: decision.reason,
-        metric: quota.metric,
-        limit: decision.limit,
-        used: decision.used,
-        remaining: decision.remaining,
-      });
+      // Built by the shared helper so a service reserving quota on its own
+      // refuses in exactly the same shape the client already handles.
+      throw quotaRefusal(quota.metric, decision);
     }
 
     if (decision.reservation) {

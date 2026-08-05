@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { createHash } from 'node:crypto';
 import { OcrStatus, Prisma } from '@legaltech/database';
+import { findPii, type PiiMatch } from '../../../common/pii/pii-patterns';
+import { maskValue, summarizePii } from '../../../common/pii/pii-redactor';
 
 /**
  * Columns returned when a document is ingested.
@@ -37,7 +39,12 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { S3StorageService } from '../../../storage/s3-storage.service';
 import { TesseractWorker } from './tesseract.worker';
 import { PdfTextExtractor } from './pdf-text-extractor';
-import { CONFIDENCE_FLOOR, isConfidenceAcceptable } from './ocr-language';
+import { PdfRasterizer } from './pdf-rasterizer';
+import {
+  CONFIDENCE_FLOOR,
+  isConfidenceAcceptable,
+  type TesseractLanguage,
+} from './ocr-language';
 import { IndexingService } from '../embedding/indexing.service';
 import { detectMimeType } from '../../../storage/file-signature';
 import type { UploadedFileLike } from '../../company/services/company-asset.service';
@@ -60,6 +67,7 @@ export class OcrService {
     private readonly storage: S3StorageService,
     private readonly tesseract: TesseractWorker,
     private readonly pdf: PdfTextExtractor,
+    private readonly rasterizer: PdfRasterizer,
     private readonly indexing: IndexingService,
     private readonly config: ConfigService,
   ) {}
@@ -70,6 +78,14 @@ export class OcrService {
 
   private get batchSize(): number {
     return this.config.get<number>('OCR_BATCH_SIZE', 3);
+  }
+
+  private get maxPdfPages(): number {
+    // Pages are rasterised and recognised one at a time, sequentially — a
+    // 500-page scan would tie up the OCR queue for a document that is very
+    // likely an entire case file rather than a single contract. Failing with
+    // an actionable message is better than a job that "processes" for an hour.
+    return this.config.get<number>('OCR_MAX_PDF_PAGES', 40);
   }
 
   // ---------------------------------------------------------------------------
@@ -298,15 +314,9 @@ export class OcrService {
         };
       }
 
-      // A scanned PDF. Rasterising pages to images needs a native tool
-      // (poppler's pdftoppm or ImageMagick), which this build does not ship —
-      // Tesseract.js takes images, not PDFs. Failing with an actionable message
-      // is better than returning empty text that looks like a blank document.
-      throw new Error(
-        'PDF has no text layer and requires rasterisation before OCR. ' +
-          'Install poppler-utils in the API image and route this document through pdftoppm, ' +
-          `or upload the pages as images. (${pdfResult.pageCount} page(s) detected)`,
-      );
+      // A scanned PDF: no text layer, so each page is rasterised to an image
+      // and recognised individually.
+      return this.extractScannedPdf(bytes, pdfResult.pageCount);
     }
 
     // Images go straight to Tesseract. The hint is empty — there is no text layer
@@ -319,6 +329,68 @@ export class OcrService {
       confidence: ocr.confidence,
       languages: ocr.languages,
       pageCount: 1,
+    };
+  }
+
+  /**
+   * OCRs an image-only PDF, one rasterised page at a time.
+   *
+   * Sequential rather than `Promise.all`: `TesseractWorker` already caps
+   * concurrent recognitions and rejects the surplus outright (it sheds load
+   * rather than queuing it — see its own comment), so fanning out pages in
+   * parallel would just turn most of them into "at capacity" failures instead
+   * of the whole document processing correctly, just not instantly. This
+   * matches how `drainQueue` already processes documents one at a time.
+   */
+  private async extractScannedPdf(
+    bytes: Buffer,
+    pageCount: number,
+  ): Promise<{
+    text: string;
+    method: string;
+    confidence: number | null;
+    languages: string[];
+    pageCount: number | null;
+  }> {
+    if (pageCount === 0) {
+      throw new Error(
+        'Could not determine the page count of this PDF; it may be corrupt or encrypted.',
+      );
+    }
+
+    if (pageCount > this.maxPdfPages) {
+      throw new Error(
+        `PDF has ${pageCount} pages, more than the ${this.maxPdfPages}-page OCR limit. ` +
+          'Split it into smaller files, or raise OCR_MAX_PDF_PAGES.',
+      );
+    }
+
+    const pageTexts: string[] = [];
+    const confidences: number[] = [];
+    const languages = new Set<TesseractLanguage>();
+    // Once a page's recognition establishes the script, later pages reuse its
+    // text as their hint — most scanned contracts are consistent throughout,
+    // and this avoids re-detecting the language from scratch on every page.
+    let hint = '';
+
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
+      const image = await this.rasterizer.rasterizePage(bytes, pageNumber);
+      const recognised = await this.tesseract.recognize(image, hint);
+
+      pageTexts.push(recognised.text);
+      confidences.push(recognised.confidence);
+      recognised.languages.forEach((language) => languages.add(language));
+      if (!hint && recognised.text.trim()) hint = recognised.text;
+    }
+
+    return {
+      // Same convention as the text-layer path: a blank line between pages,
+      // which the chunker treats as a strong boundary.
+      text: pageTexts.join('\n\n').trim(),
+      method: 'tesseract_pdf',
+      confidence: average(confidences),
+      languages: [...languages],
+      pageCount,
     };
   }
 
@@ -413,6 +485,39 @@ export class OcrService {
     return document;
   }
 
+  /**
+   * What personal and financial identifiers a scanned document is carrying.
+   *
+   * The review step before a document is exported or sent on. A scan of a
+   * counterparty's charter routinely arrives holding a director's passport
+   * number and a settlement account, and nothing until now made that visible —
+   * the text was extracted, indexed, and forgotten about.
+   *
+   * Returns masked values only. The raw identifiers stay in `extractedText`,
+   * which is already tenant-scoped; putting them in a second response would
+   * put them in a second log.
+   */
+  async scanForPii(documentId: string, companyId: string) {
+    const document = await this.prisma.client.scannedDocument.findFirst({
+      where: { id: documentId, companyId, deletedAt: null },
+      select: { id: true, originalName: true, extractedText: true },
+    });
+
+    if (!document) throw new NotFoundException('Document not found');
+
+    const matches = findPii(document.extractedText ?? '');
+
+    return {
+      documentId: document.id,
+      originalName: document.originalName,
+      clean: matches.length === 0,
+      summary: summarizePii(matches),
+      // Distinct identifiers, each masked. Offsets are included so the UI can
+      // highlight them against the text the reviewer is already looking at.
+      findings: dedupeMasked(matches),
+    };
+  }
+
   /** Re-queues a failed document, resetting its retry budget. */
   async retry(documentId: string, companyId: string): Promise<void> {
     const { count } = await this.prisma.client.scannedDocument.updateMany({
@@ -433,6 +538,12 @@ export class OcrService {
   }
 }
 
+/** Mean confidence across a multi-page recognition. */
+function average(values: number[]): number | null {
+  if (values.length === 0) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
 /** Extension for the storage key; the key never uses the uploaded filename. */
 function extensionFor(contentType: string): string {
   switch (contentType) {
@@ -447,4 +558,36 @@ function extensionFor(contentType: string): string {
     default:
       return 'bin';
   }
+}
+
+/**
+ * One entry per distinct identifier, masked, with every place it appears.
+ *
+ * Mentions are grouped rather than listed flat: a reviewer needs to know the
+ * document holds three phone numbers, not that it holds eleven occurrences.
+ * The offsets are kept so the UI can still highlight all of them.
+ */
+function dedupeMasked(matches: PiiMatch[]) {
+  const byValue = new Map<
+    string,
+    { kind: string; masked: string; occurrences: { start: number; end: number }[] }
+  >();
+
+  for (const match of matches) {
+    const key = `${match.kind}:${match.value.replace(/[^A-Za-zА-Яа-я0-9]/g, '').toLowerCase()}`;
+    const existing = byValue.get(key);
+
+    if (existing) {
+      existing.occurrences.push({ start: match.start, end: match.end });
+      continue;
+    }
+
+    byValue.set(key, {
+      kind: match.kind,
+      masked: maskValue(match.kind, match.value),
+      occurrences: [{ start: match.start, end: match.end }],
+    });
+  }
+
+  return [...byValue.values()];
 }

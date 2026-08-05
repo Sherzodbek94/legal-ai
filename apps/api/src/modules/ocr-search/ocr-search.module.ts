@@ -4,6 +4,7 @@ import { OcrSearchController } from './ocr-search.controller';
 import { OcrService } from './ocr/ocr.service';
 import { TesseractWorker } from './ocr/tesseract.worker';
 import { PdfTextExtractor } from './ocr/pdf-text-extractor';
+import { PdfRasterizer } from './ocr/pdf-rasterizer';
 import { OpenAiEmbeddingService } from './embedding/openai-embedding.service';
 import { IndexingService } from './embedding/indexing.service';
 import { HybridSearchService } from './search/hybrid-search.service';
@@ -26,6 +27,7 @@ import { HybridSearchService } from './search/hybrid-search.service';
     OcrService,
     TesseractWorker,
     PdfTextExtractor,
+    PdfRasterizer,
     OpenAiEmbeddingService,
     IndexingService,
     HybridSearchService,

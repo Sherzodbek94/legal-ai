@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { PaymentModule } from '../payment/payment.module';
 import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
 import { SubscriptionService } from './subscription/subscription.service';
@@ -21,7 +22,7 @@ import { QuotaRefundInterceptor } from './limits/quota-refund.interceptor';
  */
 @Global()
 @Module({
-  imports: [ConfigModule],
+  imports: [ConfigModule, PaymentModule],
   controllers: [BillingController],
   providers: [
     BillingService,

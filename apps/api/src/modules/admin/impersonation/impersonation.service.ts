@@ -23,7 +23,9 @@ export interface IssuedImpersonation {
   expiresAt: Date;
   expiresInSeconds: number;
   sessionId: string;
-  target: { id: string; email: string; companyId?: string };
+  // `email` is optional: an account provisioned by SMS sign-in has a phone
+  // number and no address until it supplies one.
+  target: { id: string; email?: string; companyId?: string };
 }
 
 @Injectable()
@@ -109,7 +111,7 @@ export class ImpersonationService {
 
     const payload: JwtPayload = {
       sub: target.id,
-      email: target.email,
+      email: target.email ?? undefined,
       role: target.role,
       companyId: membership?.companyId,
       companyRole: membership?.role,
@@ -178,7 +180,7 @@ export class ImpersonationService {
       sessionId: session.id,
       target: {
         id: target.id,
-        email: target.email,
+        email: target.email ?? undefined,
         companyId: membership?.companyId,
       },
     };

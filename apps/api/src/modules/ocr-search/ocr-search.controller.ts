@@ -1,5 +1,4 @@
 import {
-  Body,
   Controller,
   Get,
   HttpCode,
@@ -103,6 +102,18 @@ export class OcrSearchController {
   @Get('documents/:id/text')
   getText(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
     return this.ocr.getText(id, user.companyId!);
+  }
+
+  /**
+   * Personal and financial identifiers this document is carrying.
+   *
+   * The check before a scan is exported or forwarded. Masked values only — the
+   * raw text is already available at `/text` and tenant-scoped, and returning
+   * the identifiers a second time would put them in a second log.
+   */
+  @Get('documents/:id/pii')
+  scanPii(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.ocr.scanForPii(id, user.companyId!);
   }
 
   @Roles('OWNER', 'ADMIN', 'ATTORNEY')

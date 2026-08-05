@@ -95,6 +95,17 @@ export const NOTIFICATION_EVENTS: Record<string, NotificationEventDefinition> = 
     channels: [IN_APP, EMAIL],
     urgency: 'low',
   },
+  'billing.renewal_payment_due': {
+    key: 'billing.renewal_payment_due',
+    description: 'A subscription renewal is ready to pay',
+    // None of the four payment gateways support charging a customer without
+    // their involvement, so renewal cannot silently succeed — this is what
+    // asks them to complete it, and it carries the same deadline as
+    // `billing.grace_period_ending`.
+    channels: [IN_APP, EMAIL, SMS, TELEGRAM],
+    urgency: 'critical',
+    mandatory: true,
+  },
   'billing.grace_period_ending': {
     key: 'billing.grace_period_ending',
     description: 'Service will be suspended shortly unless payment is updated',

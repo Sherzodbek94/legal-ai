@@ -2,6 +2,7 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { ConfigService } from '@nestjs/config';
 import {
   PaymentOrderStatus,
+  Prisma,
   SubscriptionPlan,
   type PaymentOrder,
 } from '@legaltech/database';
@@ -57,6 +58,49 @@ export class PaymentOrderService {
         description: `${definition.name} subscription`,
         status: PaymentOrderStatus.PENDING,
         expiresAt: new Date(Date.now() + this.ttlMs),
+      },
+    });
+  }
+
+  /**
+   * Creates a payable order on the company's behalf, outside a request.
+   *
+   * Used by `RenewalService`: a renewal that is due has no `AuthenticatedUser`
+   * to act as, and the amount is whatever the renewal actually owes — after
+   * coupon discount — rather than the plan's list price `create()` looks up.
+   *
+   * `expiresAt` is a parameter rather than reusing `ttlMs`: that default (a
+   * few hours) is sized for a customer actively sitting in a checkout flow,
+   * where a renewal reminder is read whenever the customer next opens their
+   * email. The caller aligns it with the billing grace period instead — the
+   * order should stay payable for exactly as long as the subscription does.
+   *
+   * Takes an explicit transaction client: `RenewalService` creates this order
+   * in the same transaction as the subscription's PAST_DUE transition, on the
+   * same "both or neither" reasoning `renewOne` documents for its own writes.
+   */
+  async createSystemOrder(
+    tx: Prisma.TransactionClient,
+    params: {
+      companyId: string;
+      subscriptionId: string;
+      plan: SubscriptionPlan;
+      amountCents: number;
+      currency: string;
+      description: string;
+      expiresAt: Date;
+    },
+  ): Promise<PaymentOrder> {
+    return tx.paymentOrder.create({
+      data: {
+        companyId: params.companyId,
+        subscriptionId: params.subscriptionId,
+        plan: params.plan,
+        amountCents: params.amountCents,
+        currency: params.currency,
+        description: params.description,
+        status: PaymentOrderStatus.PENDING,
+        expiresAt: params.expiresAt,
       },
     });
   }

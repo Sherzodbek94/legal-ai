@@ -86,7 +86,7 @@ export class NotificationService {
     }
 
     const routing = routeEvent(input.event, recipient.preferences, {
-      fallbackEmail: recipient.email,
+      fallbackEmail: recipient.email ?? undefined,
     });
 
     const notificationIds: string[] = [];
