@@ -114,12 +114,158 @@ jobs:
         run: npm run build
 
   # ---------------------------------------------------------------------------
+  # 1b. API e2e — a real Postgres on the port the suite insists on (5433, never
+  #     5432) plus Redis, exercising the hand-written SQL in migrations and
+  #     cross-tenant isolation that the unit suite's in-memory Prisma cannot
+  #     reach. Blocks the build, same as the unit suite: this is where the
+  #     company/asset tenant-isolation regression test lives.
+  # ---------------------------------------------------------------------------
+  test-e2e:
+    name: Test (API e2e)
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 15
+
+    services:
+      postgres-test:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: legaltech_test
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d legaltech_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/legaltech_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      JWT_ACCESS_SECRET: test-jwt-secret-that-is-long-enough-for-validation
+      DOCUMENT_VERIFICATION_SECRET: test-document-verification-secret-long-enough
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema packages/database/prisma/schema.prisma
+
+      # global-setup.ts applies migrations itself (`prisma migrate reset`
+      # against TEST_DATABASE_URL) before any suite runs, so there is no
+      # separate migrate step here.
+      - name: Run API e2e suite
+        run: npm run test:e2e
+
+  # ---------------------------------------------------------------------------
+  # 1c. Playwright — the full stack in a real browser: cookie `sameSite`
+  #     behaviour, credentialed CORS, and whether Cyrillic/Uzbek text survives
+  #     into a generated PDF. Reported but not yet a required gate: this suite
+  #     has never had a confirmed green run (see README "Known gaps"), so
+  #     failing it here surfaces the first real signal without blocking every
+  #     deploy on an unproven suite. Promote to a required `needs` on `build`
+  #     once it has run clean.
+  # ---------------------------------------------------------------------------
+  test-e2e-browser:
+    name: Test (browser)
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 20
+    continue-on-error: true
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: legaltech
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d legaltech"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/legaltech?schema=public
+      REDIS_URL: redis://localhost:6379
+      JWT_ACCESS_SECRET: test-jwt-secret-that-is-long-enough-for-validation
+      DOCUMENT_VERIFICATION_SECRET: test-document-verification-secret-long-enough
+      CI: 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # Puppeteer's Chromium IS needed here — document-generation.spec.ts
+      # exercises real PDF export.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema packages/database/prisma/schema.prisma
+
+      - name: Apply migrations
+        run: npx prisma migrate deploy --schema packages/database/prisma/schema.prisma
+
+      - name: Seed demo data
+        run: npm run db:seed
+
+      - name: Run Playwright suite
+        run: npm run test:e2e:browser
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
   # 2. Build and push images
   # ---------------------------------------------------------------------------
   build:
     name: Build images
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, test-e2e]
     # Never publishes from a pull request: the image would carry unreviewed code
     # under a tag someone could deploy.
     if: github.event_name != 'pull_request'

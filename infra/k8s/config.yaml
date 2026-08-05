@@ -15,6 +15,11 @@ data:
   # play. This must list the exact origin the web app is served from.
   CORS_ORIGINS: "https://app.legaltech.example.com"
 
+  # Used to build links inside emails and other notifications sent from the
+  # API (e.g. a renewal payment link) — those are read outside a browser
+  # session, so a relative path has nothing to resolve against.
+  WEB_APP_URL: "https://app.legaltech.example.com"
+
   JWT_ISSUER: "legaltech-api"
   JWT_AUDIENCE: "legaltech-web"
   ACCESS_TOKEN_TTL: "15m"
