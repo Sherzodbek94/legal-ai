@@ -56,18 +56,35 @@ export function GenerateForm({
 
   const declared = new Set(definitions.map((definition) => definition.key));
 
-  /**
-   * The compact form is the essential fields; the rest sit behind a disclosure.
-   *
-   * The API guarantees an advanced variable is optional or carries a default,
-   * so a drafter who never opens the disclosure still submits successfully —
-   * this component does not re-check that.
-   */
-  const essential = definitions.filter((definition) => !definition.advanced);
-  const advanced = definitions.filter((definition) => definition.advanced);
-
   const valueFor = (definition: VariableDefinition) =>
     applied[definition.key] ?? companyDefaults[definition.key];
+
+  /**
+   * Two ways a field earns its place behind the disclosure.
+   *
+   * `advanced` is the template author's call — a statutory or house-standard
+   * term, guaranteed by the API to be optional or carry a default, so leaving
+   * the disclosure closed still submits.
+   *
+   * The second is this component's: a field already filled from the company
+   * profile. Across the shipped templates that is six to eight fields each —
+   * the drafter's own STIR, address, bank details and director — and nobody
+   * needs to review their own registered particulars to paper a hire. It is
+   * decided per render rather than in the schema precisely because it depends
+   * on whether the value actually arrived: an incomplete profile leaves the
+   * field blank, and a blank required field stays in front of the drafter
+   * where they can see what is missing. Hiding it would produce a form that
+   * cannot be submitted and does not say why.
+   */
+  const isPrefilled = (definition: VariableDefinition) =>
+    Boolean(companyDefaults[definition.key]?.trim());
+
+  const essential = definitions.filter(
+    (definition) => !definition.advanced && !isPrefilled(definition),
+  );
+  const advanced = definitions.filter(
+    (definition) => definition.advanced || isPrefilled(definition),
+  );
 
   const advancedHasError = advanced.some(
     (definition) => state.fieldErrors?.[definition.key],
@@ -150,10 +167,10 @@ export function GenerateForm({
               open={advancedHasError}
             >
               <summary className="cursor-pointer px-4 py-3 text-sm font-medium">
-                Additional terms
+                Already filled in
                 <span className="ml-2 font-normal text-muted-foreground">
-                  {advanced.length} standard {advanced.length === 1 ? 'field' : 'fields'}
-                  , already set
+                  {advanced.length} {advanced.length === 1 ? 'field' : 'fields'} — your
+                  company details and standard terms
                 </span>
               </summary>
 

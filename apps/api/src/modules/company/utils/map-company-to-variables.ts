@@ -45,8 +45,14 @@ export type CompanyVariables = Record<string, string>;
 const ALIASES: Record<string, string[]> = {
   company_stir: ['company_tin', 'company_inn'],
   company_legal_address: ['company_address'],
-  company_director_name: ['company_representative_name'],
+  company_director_name: [
+    'company_representative_name',
+    'company_director_fio',
+    'company_director',
+  ],
   company_director_position: ['company_representative_position'],
+  company_bank_name: ['company_bank'],
+  company_bank_account: ['company_account'],
   company_legal_name: ['company_full_name'],
 };
 

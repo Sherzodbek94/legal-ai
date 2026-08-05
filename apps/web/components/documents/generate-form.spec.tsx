@@ -89,35 +89,35 @@ describe('GenerateForm', () => {
       // not in the drafter's way.
       renderForm([...ESSENTIAL, ...ADVANCED]);
 
-      const disclosure = screen.getByText(/additional terms/i).closest('details');
+      const disclosure = screen.getByText(/already filled in/i).closest('details');
       expect(disclosure).not.toHaveAttribute('open');
       expect(screen.getByLabelText(/yillik ta'til/i)).toBeInTheDocument();
     });
 
     it('says how many fields are already set', () => {
-      // "2 standard fields, already set" reads as reassurance; a bare
-      // "Additional terms" reads as more work waiting.
+      // "2 fields — your company details" reads as reassurance; a bare
+      // "Already filled in" reads as more work waiting.
       renderForm([...ESSENTIAL, ...ADVANCED]);
 
-      expect(screen.getByText(/2 standard fields, already set/i)).toBeInTheDocument();
+      expect(screen.getByText(/2 fields — your company details/i)).toBeInTheDocument();
     });
 
     it('opens on request', async () => {
       renderForm([...ESSENTIAL, ...ADVANCED]);
 
-      await userEvent.click(screen.getByText(/additional terms/i));
+      await userEvent.click(screen.getByText(/already filled in/i));
 
-      expect(screen.getByText(/additional terms/i).closest('details')).toHaveAttribute(
+      expect(screen.getByText(/already filled in/i).closest('details')).toHaveAttribute(
         'open',
       );
     });
 
     it('offers no disclosure when every field is essential', () => {
-      // An empty "Additional terms" panel is a promise of hidden complexity
+      // An empty "Already filled in" panel is a promise of hidden complexity
       // that isn't there.
       renderForm(ESSENTIAL);
 
-      expect(screen.queryByText(/additional terms/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/already filled in/i)).not.toBeInTheDocument();
     });
   });
 
@@ -128,7 +128,7 @@ describe('GenerateForm', () => {
       setState({ fieldErrors: { annual_leave_days: 'must be at least 15' } });
       renderForm([...ESSENTIAL, ...ADVANCED]);
 
-      expect(screen.getByText(/additional terms/i).closest('details')).toHaveAttribute(
+      expect(screen.getByText(/already filled in/i).closest('details')).toHaveAttribute(
         'open',
       );
       expect(screen.getByText(/must be at least 15/i)).toBeVisible();
@@ -139,7 +139,7 @@ describe('GenerateForm', () => {
       renderForm([...ESSENTIAL, ...ADVANCED]);
 
       expect(
-        screen.getByText(/additional terms/i).closest('details'),
+        screen.getByText(/already filled in/i).closest('details'),
       ).not.toHaveAttribute('open');
     });
   });
@@ -182,5 +182,92 @@ describe('GenerateForm', () => {
       expect(field.value).toBe('');
       expect(field.placeholder).toBe('40');
     });
+  });
+});
+
+/**
+ * Collapsing what the company profile already answered.
+ *
+ * Across the shipped templates this is six to eight fields each — the
+ * drafter's own STIR, address, bank details and director. Nobody reviews their
+ * own registered particulars to paper a hire, and putting them first is most
+ * of why a routine document feels like a form-filling exercise.
+ *
+ * The decision is per render rather than per schema because it depends on
+ * whether the value actually arrived. An incomplete profile is the case that
+ * matters: hiding a required field that came back blank produces a form that
+ * cannot be submitted and does not say why.
+ */
+describe('GenerateForm — profile-filled fields', () => {
+  const COMPANY: VariableDefinition[] = [
+    { key: 'company_tin', label: 'Ish beruvchi STIR', type: 'string', required: true },
+    {
+      key: 'company_bank_account',
+      label: 'Ish beruvchi hisob raqami',
+      type: 'string',
+      required: true,
+    },
+  ];
+
+  function renderWith(defaults: Record<string, string>) {
+    render(
+      <GenerateForm
+        definitions={[...ESSENTIAL, ...COMPANY]}
+        companyDefaults={defaults}
+        templateName="Mehnat shartnomasi"
+        aiAvailable
+        counterpartyLookupAvailable={false}
+        action={jest.fn()}
+      />,
+    );
+  }
+
+  it('collapses a required field the profile answered', () => {
+    renderWith({ company_tin: '301234567', company_bank_account: '20208000900001234567' });
+
+    expect(screen.getByText(/already filled in/i).closest('details')).not.toHaveAttribute(
+      'open',
+    );
+    // Still submitted — collapsed, not dropped.
+    expect((screen.getByLabelText(/stir/i) as HTMLInputElement).value).toBe('301234567');
+  });
+
+  it('leaves the hire particulars in front of the drafter', () => {
+    renderWith({ company_tin: '301234567', company_bank_account: '2020' });
+
+    const disclosure = screen.getByText(/already filled in/i).closest('details');
+    expect(disclosure).not.toContainElement(screen.getByLabelText(/lavozim/i));
+    expect(disclosure).toContainElement(screen.getByLabelText(/stir/i));
+  });
+
+  it('keeps a field the profile could not answer out front', () => {
+    // The incomplete-profile case. A blank required field belongs where the
+    // drafter can see what is missing.
+    renderWith({ company_tin: '301234567' });
+
+    const disclosure = screen.getByText(/already filled in/i).closest('details');
+    expect(disclosure).not.toContainElement(screen.getByLabelText(/hisob raqami/i));
+  });
+
+  it.each(['', '   '])('treats %p as unanswered', (value) => {
+    renderWith({ company_tin: value, company_bank_account: '20208000900001234567' });
+
+    const disclosure = screen.getByText(/already filled in/i).closest('details');
+    expect(disclosure).not.toContainElement(screen.getByLabelText(/stir/i));
+  });
+
+  it('offers no disclosure when the profile answered nothing', () => {
+    renderWith({});
+
+    expect(screen.queryByText(/already filled in/i)).not.toBeInTheDocument();
+  });
+
+  it('opens itself when the server rejects a collapsed profile field', () => {
+    setState({ fieldErrors: { company_tin: 'must be 9 digits' } });
+    renderWith({ company_tin: '30123', company_bank_account: '2020' });
+
+    expect(screen.getByText(/already filled in/i).closest('details')).toHaveAttribute(
+      'open',
+    );
   });
 });
