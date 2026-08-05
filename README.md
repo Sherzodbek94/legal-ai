@@ -467,7 +467,9 @@ npm run test                       # everything
 cd apps/api && npx jest --coverage
 ```
 
-899 tests across 44 suites. They are unit and integration tests over real
+1,269 tests: 1,196 across 60 API suites, 73 across 4 web suites. The web ones
+cover `apps/web/lib` — the pure logic the pages depend on. The rest are unit
+and integration tests over real
 behaviour — the payment webhook suites drive a real Nest app over HTTP with an
 in-memory Prisma that reproduces the actual unique constraints, so retry and race
 paths are genuinely exercised rather than mocked.
