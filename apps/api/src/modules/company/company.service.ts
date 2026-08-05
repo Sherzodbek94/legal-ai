@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@legaltech/database';
+import { CompanyMemberRole, Prisma, type Company } from '@legaltech/database';
 import { PrismaService } from '../../prisma/prisma.service';
 import type { CreateCompanyDto, UpdateCompanyDto } from './dto/company.dto';
 import {
@@ -12,27 +12,51 @@ import {
   type CompanyVariables,
 } from './utils/map-company-to-variables';
 
+/**
+ * Company profiles.
+ *
+ * Every method takes the caller's tenant and scopes to it. This service
+ * previously did not: `findAll()` returned every company on the platform to any
+ * authenticated user, and `findOne`/`update`/`softDelete` accepted any id — so
+ * the owner of one company could read, edit, or delete another's profile, which
+ * carries their banking details and registry identifiers.
+ *
+ * The role guard did not help. `@Roles('OWNER')` asks "is this caller an owner",
+ * not "an owner of *this* company", and that distinction is the whole of
+ * multi-tenant authorisation.
+ */
 @Injectable()
 export class CompanyService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Soft-deleted companies are excluded from every read path. */
-  findAll() {
+  /**
+   * The caller's own company, as a list.
+   *
+   * A list of one, because the session carries a single tenant. The shape is
+   * kept so the frontend does not need a special case, and so it stays correct
+   * if a user is ever a member of several companies.
+   */
+  findAll(companyId: string) {
     return this.prisma.client.company.findMany({
-      where: { deletedAt: null },
+      where: { id: companyId, deletedAt: null },
       orderBy: { createdAt: 'desc' },
     });
   }
 
-  findOne(id: string) {
+  findOne(id: string, companyId: string) {
+    // An id from another tenant simply does not resolve. Filtering in the query
+    // rather than comparing after the fetch means there is no window where the
+    // row exists in memory.
     return this.prisma.client.company.findFirst({
-      where: { id, deletedAt: null },
+      where: { id, deletedAt: null, ...scopeTo(companyId, id) },
     });
   }
 
-  private async getOrThrow(id: string) {
-    const company = await this.findOne(id);
+  private async getOrThrow(id: string, companyId: string) {
+    const company = await this.findOne(id, companyId);
     if (!company) {
+      // 404 rather than 403: a 403 would confirm the company exists, which is
+      // itself information a stranger should not get.
       throw new NotFoundException('Company not found');
     }
     return company;
@@ -46,8 +70,55 @@ export class CompanyService {
     }
   }
 
-  async update(id: string, dto: UpdateCompanyDto) {
-    await this.getOrThrow(id);
+  /**
+   * Creates a user's first company and makes them its owner.
+   *
+   * This is the one gap that made registration a dead end: `POST /companies`
+   * requires `@Roles('OWNER', 'ADMIN')`, which only an *existing* member can
+   * hold, and even a caller who somehow got past that guard would find that
+   * `create()` above never writes a `CompanyMember` row. A brand-new user —
+   * whether from `/auth/register` or a first OneID login — had no path to
+   * ever become the owner of anything. This is that path: no role
+   * requirement (there is nothing to require a role of yet), and both rows
+   * are written together so the company never exists without its owner.
+   *
+   * Refuses outright if the caller already belongs to a company. One person,
+   * one company is the whole of this product's tenancy model — see the
+   * `findAll` comment above — and silently creating a second one would leave
+   * the caller with two active memberships that nothing else expects.
+   */
+  async registerAsOwner(userId: string, dto: CreateCompanyDto): Promise<Company> {
+    const existing = await this.prisma.client.companyMember.findFirst({
+      where: { userId, deletedAt: null },
+      select: { id: true },
+    });
+
+    if (existing) {
+      throw new ConflictException('This account already belongs to a company');
+    }
+
+    try {
+      return await this.prisma.client.$transaction(async (tx) => {
+        const company = await tx.company.create({ data: dto });
+
+        await tx.companyMember.create({
+          data: {
+            companyId: company.id,
+            userId,
+            role: CompanyMemberRole.OWNER,
+            joinedAt: new Date(),
+          },
+        });
+
+        return company;
+      });
+    } catch (error) {
+      throw this.translateUniqueViolation(error);
+    }
+  }
+
+  async update(id: string, dto: UpdateCompanyDto, companyId: string) {
+    await this.getOrThrow(id, companyId);
     try {
       return await this.prisma.client.company.update({
         where: { id },
@@ -58,8 +129,8 @@ export class CompanyService {
     }
   }
 
-  async softDelete(id: string) {
-    await this.getOrThrow(id);
+  async softDelete(id: string, companyId: string) {
+    await this.getOrThrow(id, companyId);
     await this.prisma.client.company.update({
       where: { id },
       data: { deletedAt: new Date() },
@@ -72,11 +143,14 @@ export class CompanyService {
    * Returning the gaps alongside the variables lets a caller refuse to spend a
    * generation call on a profile that would produce an incomplete contract.
    */
-  async getPromptVariables(id: string): Promise<{
+  async getPromptVariables(
+    id: string,
+    companyId: string,
+  ): Promise<{
     variables: CompanyVariables;
     missingRequired: string[];
   }> {
-    const company = await this.getOrThrow(id);
+    const company = await this.getOrThrow(id, companyId);
     const variables = mapCompanyToVariables(company);
     return {
       variables,
@@ -103,4 +177,15 @@ export class CompanyService {
     }
     return error;
   }
+}
+
+/**
+ * Restricts a lookup to the caller's tenant.
+ *
+ * Returns an unsatisfiable predicate when the requested id is not the caller's
+ * company, so the query returns nothing rather than the caller's own row under
+ * someone else's id.
+ */
+function scopeTo(companyId: string, requestedId: string): Prisma.CompanyWhereInput {
+  return requestedId === companyId ? {} : { id: '__no_match__' };
 }

@@ -34,14 +34,17 @@ export class CompanyController {
     private readonly assetService: CompanyAssetService,
   ) {}
 
+  // Every read and write below is scoped to the caller's tenant. Without that,
+  // @Roles('OWNER') only asks whether the caller is *an* owner — not an owner of
+  // this company.
   @Get()
-  findAll() {
-    return this.companyService.findAll();
+  findAll(@CurrentUser() user: AuthenticatedUser) {
+    return this.companyService.findAll(user.companyId!);
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.companyService.findOne(id);
+  findOne(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.companyService.findOne(id, user.companyId!);
   }
 
   @Roles('OWNER', 'ADMIN')
@@ -52,21 +55,25 @@ export class CompanyController {
 
   @Roles('OWNER', 'ADMIN')
   @Patch(':id')
-  update(@Param('id') id: string, @Body() dto: UpdateCompanyDto) {
-    return this.companyService.update(id, dto);
+  update(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateCompanyDto,
+  ) {
+    return this.companyService.update(id, dto, user.companyId!);
   }
 
   @Roles('OWNER')
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  remove(@Param('id') id: string) {
-    return this.companyService.softDelete(id);
+  remove(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.companyService.softDelete(id, user.companyId!);
   }
 
   /** Prompt variables plus any required fields still missing. */
   @Get(':id/variables')
-  getVariables(@Param('id') id: string) {
-    return this.companyService.getPromptVariables(id);
+  getVariables(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.companyService.getPromptVariables(id, user.companyId!);
   }
 
   // -------------------------------------------------------------------------
@@ -82,7 +89,6 @@ export class CompanyController {
     FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 } }),
   )
   uploadAsset(
-    @Param('id') id: string,
     @Param('type') type: CompanyAssetType,
     @CurrentUser() user: AuthenticatedUser,
     @UploadedFile(
@@ -92,24 +98,30 @@ export class CompanyController {
     )
     file: UploadedFileLike,
   ) {
-    return this.assetService.upload(id, type, file, user?.id);
+    return this.assetService.upload(user.companyId!, type, file, user?.id);
   }
 
   @Get(':id/assets')
-  listAssets(@Param('id') id: string) {
-    return this.assetService.listForCompany(id);
+  listAssets(@CurrentUser() user: AuthenticatedUser) {
+    return this.assetService.listForCompany(user.companyId!);
   }
 
   /** Returns a short-lived presigned URL; the bucket is never public. */
   @Get(':id/assets/:assetId/download-url')
-  getAssetUrl(@Param('id') id: string, @Param('assetId') assetId: string) {
-    return this.assetService.getDownloadUrl(id, assetId);
+  getAssetUrl(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('assetId') assetId: string,
+  ) {
+    return this.assetService.getDownloadUrl(user.companyId!, assetId);
   }
 
   @Roles('OWNER', 'ADMIN')
   @Delete(':id/assets/:assetId')
   @HttpCode(HttpStatus.NO_CONTENT)
-  removeAsset(@Param('id') id: string, @Param('assetId') assetId: string) {
-    return this.assetService.remove(id, assetId);
+  removeAsset(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('assetId') assetId: string,
+  ) {
+    return this.assetService.remove(user.companyId!, assetId);
   }
 }
