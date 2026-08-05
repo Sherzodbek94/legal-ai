@@ -11,6 +11,8 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
+    "//test:e2e": "--forceExit because the suite boots the real AppModule: BullMQ's Redis connections and the Socket.IO gateway stay open after the last assertion, so Jest reports every test passing and then never returns. It reads as a hang, and in CI it burns the job's whole timeout on a green run.",
+    "test:e2e": "jest --config test/jest-e2e.json --runInBand --forceExit",
     "clean": "rimraf dist"
   },
   "dependencies": {

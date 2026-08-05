@@ -13,15 +13,21 @@
     "db:deploy": "prisma migrate deploy",
     "db:validate": "prisma validate",
     "db:studio": "prisma studio",
+    "db:seed": "prisma db seed",
     "lint": "echo \"@legaltech/database: no lint configured\"",
     "clean": "rimraf dist"
   },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
   "dependencies": {
-    "@prisma/client": "^5.19.1"
+    "@prisma/client": "^5.19.1",
+    "bcryptjs": "^3.0.3"
   },
   "devDependencies": {
     "prisma": "^5.19.1",
     "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
     "typescript": "^5.5.4"
   }
 }

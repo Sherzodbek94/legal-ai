@@ -10,7 +10,8 @@
     "dev": {
       "dependsOn": ["db:generate"],
       "cache": false,
-      "persistent": true
+      "persistent": true,
+      "passThroughEnv": ["THROTTLE_DISABLED"]
     },
     "lint": {
       "dependsOn": ["^build"]

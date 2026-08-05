@@ -1,0 +1,46 @@
+{
+  "root": true,
+  "parser": "@typescript-eslint/parser",
+  "parserOptions": {
+    "project": "./tsconfig.json",
+    "sourceType": "module"
+  },
+  "plugins": ["@typescript-eslint"],
+  "extends": [
+    "eslint:recommended",
+    "plugin:@typescript-eslint/recommended"
+  ],
+  "env": {
+    "node": true,
+    "jest": true
+  },
+  "ignorePatterns": [".eslintrc.js", "dist", "node_modules"],
+  "rules": {
+    "@typescript-eslint/interface-name-prefix": "off",
+    "@typescript-eslint/explicit-function-return-type": "off",
+    "@typescript-eslint/explicit-module-boundary-types": "off",
+    "@typescript-eslint/no-explicit-any": "warn",
+    // `varsIgnorePattern` alongside `argsIgnorePattern`: destructuring-to-omit
+    // is the idiomatic way to drop a key —
+    //   const { timestamp: _timestamp, ...rest } = body
+    // — and the binding is deliberately unused. Without it the pattern is
+    // reported as dead code. `ignoreRestSiblings` covers the same shape when
+    // the discarded name is not underscore-prefixed.
+    "@typescript-eslint/no-unused-vars": [
+      "warn",
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "ignoreRestSiblings": true
+      }
+    ],
+    // Sanitizers in common/prompt and common/text deliberately match control
+    // characters (e.g. \x00-\x1f) to strip them from user input before it
+    // reaches an AI prompt or a generated document — that is the rule this
+    // would otherwise flag as a mistake.
+    "no-control-regex": "off",
+    // uz-identifiers.ts strips a literal non-breaking space users paste from
+    // Word/PDF documents; only allow irregular whitespace inside literals.
+    "no-irregular-whitespace": ["error", { "skipRegExps": true, "skipStrings": true }]
+  }
+}

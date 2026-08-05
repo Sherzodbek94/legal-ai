@@ -1,0 +1,93 @@
+# =============================================================================
+# Local development dependencies.
+#
+#     docker compose up -d
+#
+# Brings up only what the application cannot run without: PostgreSQL with
+# pgvector, and Redis. The apps themselves run on the host via `npm run dev`, so
+# hot reload and debugging work normally — containerising them here would trade
+# that away for no benefit during development.
+# =============================================================================
+
+services:
+  postgres:
+    # pgvector's own image, NOT plain postgres:16. The schema declares
+    # `vector(1536)` columns and `CREATE EXTENSION vector` in the first
+    # migration; on a stock Postgres image that migration fails immediately.
+    image: pgvector/pgvector:pg16
+    container_name: legaltech-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: legaltech
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` returns success while the server is still finishing
+      # initialisation, so the user and database are named explicitly — otherwise
+      # migrations can start against a server that is not yet accepting them.
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d legaltech']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: legaltech-redis
+    restart: unless-stopped
+    ports:
+      # Host port is overridable because Windows reserves large TCP ranges for
+      # Hyper-V, and 6379 frequently lands inside one — the bind then fails with
+      # "an attempt was made to access a socket in a way forbidden by its access
+      # permissions", which reads like a firewall problem rather than a reserved
+      # port. Check with: netsh interface ipv4 show excludedportrange protocol=tcp
+      # Set REDIS_PORT in .env and match it in REDIS_URL.
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redis-data:/data
+    # `--appendonly yes` persists across restarts. Not strictly required — every
+    # value in Redis here is reconstructible — but it means a restart mid-session
+    # does not sign everyone out or drop queued notifications.
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Test database.
+  #
+  # A SECOND Postgres on a different port, so the e2e suite can truncate and
+  # migrate freely without destroying development data. Running tests against the
+  # development database is how a morning's seed data disappears.
+  #
+  # `tmpfs` puts the data directory in memory: the test database is disposable by
+  # definition, and it makes the migrate-and-truncate cycle noticeably faster.
+  # ---------------------------------------------------------------------------
+  postgres-test:
+    image: pgvector/pgvector:pg16
+    container_name: legaltech-postgres-test
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: legaltech_test
+    ports:
+      - '5433:5432'
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d legaltech_test']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres-data:
+  redis-data:
