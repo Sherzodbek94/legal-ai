@@ -10,6 +10,7 @@
  * billable attempts.
  */
 import { of, throwError } from 'rxjs';
+import { Logger } from '@nestjs/common';
 import type { HttpService } from '@nestjs/axios';
 import type { ConfigService } from '@nestjs/config';
 import { DevSmsService } from './devsms.service';
@@ -212,6 +213,60 @@ describe('DevSmsService', () => {
       expect(await service.send('998901234567', 'hi')).toEqual({
         providerMessageId: undefined,
       });
+    });
+  });
+
+  describe('balance warning', () => {
+    /**
+     * The live API answers with decimal strings — `"balance": "400.00"` — where
+     * the documentation shows JSON numbers. Every case here uses the string
+     * form, because a check written against the documented types is dead code
+     * that never fires against the real gateway.
+     */
+    function sendWith(balance: unknown, total_cost: unknown) {
+      const errors: string[] = [];
+      const spy = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation((message: unknown) => {
+          errors.push(String(message));
+        });
+
+      const { service } = build(
+        { DEVSMS_TOKEN: 't' },
+        { success: true, data: { sms_id: 1, balance, total_cost } },
+      );
+
+      return service
+        .send('998901234567', 'hi')
+        .then(() => errors)
+        .finally(() => spy.mockRestore());
+    }
+
+    it('warns once the balance no longer covers another message', async () => {
+      // 200 left, 200 a message: this send worked, the next one will not.
+      expect(await sendWith('200.00', '200.00')).toHaveLength(0);
+      expect(await sendWith('100.00', '200.00')).toHaveLength(1);
+    });
+
+    it('says what is left and what a message costs', async () => {
+      const [message] = await sendWith('100.00', '200.00');
+      expect(message).toMatch(/100/);
+      expect(message).toMatch(/200/);
+    });
+
+    it('stays quiet on a healthy balance', async () => {
+      expect(await sendWith('40000.00', '200.00')).toHaveLength(0);
+    });
+
+    it('warns on an exhausted balance even without a cost', async () => {
+      expect(await sendWith('0.00', undefined)).toHaveLength(1);
+    });
+
+    it('says nothing when the response omits the balance', async () => {
+      // A missing field must not read as a zero balance — `Number(null)` is 0,
+      // which would report every response without the field as an outage.
+      expect(await sendWith(undefined, undefined)).toHaveLength(0);
+      expect(await sendWith(null, null)).toHaveLength(0);
     });
   });
 

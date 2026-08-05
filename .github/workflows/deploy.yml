@@ -8,10 +8,14 @@
 name: Deploy
 
 on:
+  # `master`, because that is this repository's default branch. Naming a branch
+  # that does not exist is the worst way for this to be wrong: every job is
+  # skipped, nothing reports a failure, and the absence of a red check reads
+  # exactly like a green one.
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
   # Manual runs, for redeploying a known-good commit without pushing to it.
   workflow_dispatch:
     inputs:
@@ -348,7 +352,7 @@ jobs:
     name: Deploy
     runs-on: ubuntu-latest
     needs: build
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 20
 
     # Bind to a GitHub Environment so KUBE_CONFIG is scoped to it and a

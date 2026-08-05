@@ -26,16 +26,26 @@ interface DevSmsEnvelope<T> {
   data?: T;
 }
 
+/**
+ * Numeric fields are typed loosely on purpose.
+ *
+ * The published examples show them as JSON numbers (`"balance": 950`), but the
+ * live API answers with decimal strings (`"balance": "400.00"`). A `typeof x ===
+ * 'number'` check against this payload is therefore dead code that always
+ * skips — which is how the balance warning below was silently doing nothing
+ * until a real response was compared against the documentation.
+ */
 interface SendData {
   /** DevSMS's own row id. Accepted by `get_status.php` as `sms_id`. */
-  sms_id?: number;
+  sms_id?: number | string;
   /** Upstream gateway's id. Accepted by `get_status.php` as `request_id`. */
   request_id?: string;
   status?: string;
-  parts_count?: number;
-  total_cost?: number;
+  parts_count?: number | string;
+  /** What this message cost, in the same units as `balance`. */
+  total_cost?: number | string;
   /** Credit left after this message — the only warning before sending stops. */
-  balance?: number;
+  balance?: number | string;
 }
 
 interface StatusData {
@@ -141,12 +151,18 @@ export class DevSmsService {
 
       const data = this.unwrap(response.data, 'send');
 
-      if (typeof data?.balance === 'number' && data.balance <= 0) {
-        // Nothing is wrong with THIS message — it was sent. The next one will
-        // not be, and an OTP that cannot be delivered locks people out of the
-        // product entirely, so this is worth an error line before it does.
+      // Nothing is wrong with THIS message — it was sent. The next one may not
+      // be, and an OTP that cannot be delivered locks people out of the product
+      // entirely, so the warning is worth raising while there is still time to
+      // act on it. The trigger is "cannot afford another message like this one"
+      // rather than "balance is zero", which fires one message too late.
+      const balance = toNumber(data?.balance);
+      const cost = toNumber(data?.total_cost);
+      if (balance !== null && balance < (cost ?? 1)) {
         this.logger.error(
-          `DevSMS balance is exhausted (${data.balance}); further messages will fail`,
+          `DevSMS balance is down to ${balance} and the last message cost ${
+            cost ?? 'an unknown amount'
+          }; sending is about to start failing`,
         );
       }
 
@@ -253,6 +269,19 @@ export class DevSmsService {
       retryAfter,
     );
   }
+}
+
+/**
+ * Reads one of DevSMS's loosely-typed numeric fields.
+ *
+ * Returns null rather than NaN for anything unusable, so a missing field and a
+ * zero balance stay distinguishable — `Number(null)` is 0, which would report an
+ * absent value as an exhausted account.
+ */
+function toNumber(value: number | string | undefined | null): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 /**
