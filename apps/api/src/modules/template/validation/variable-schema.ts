@@ -41,6 +41,23 @@ export interface VariableDefinition {
   /** Applied when the caller omits an optional variable. */
   defaultValue?: string | number | boolean;
 
+  /**
+   * Hidden behind a disclosure in the compact form.
+   *
+   * The shipped employment contract declares 31 variables, 30 of them required
+   * — a wall that has to be filled in before a routine hire can be papered.
+   * Most of those are statutory or house-standard figures that are the same on
+   * every contract; a few are the actual particulars of this hire. This flag is
+   * the difference.
+   *
+   * A variable may only be advanced if leaving it alone still produces a valid
+   * submission — it is optional, or it carries a `defaultValue`. Hiding a
+   * required field with nothing to fall back on would produce a form that
+   * cannot be submitted and does not say why; see `parseVariable`, which
+   * rejects that combination rather than trusting the author to avoid it.
+   */
+  advanced?: boolean;
+
   // --- string / text --------------------------------------------------------
   minLength?: number;
   maxLength?: number;
@@ -208,6 +225,21 @@ function parseVariable(
     typeof raw.defaultValue === 'boolean'
   ) {
     definition.defaultValue = raw.defaultValue;
+  }
+
+  if (raw.advanced === true) {
+    // Refused rather than silently downgraded to `advanced: false`: an author
+    // who marked this advanced believes it does not need filling in, and the
+    // honest answer is that the schema says otherwise. Downgrading would leave
+    // them with a form they think is compact and is not.
+    if (definition.required && definition.defaultValue === undefined) {
+      issues.push({
+        path: `${at}.advanced`,
+        message: `${at} cannot be advanced while it is required with no defaultValue — the compact form would hide a field that must be filled in, and offer no way to discover it`,
+      });
+    } else {
+      definition.advanced = true;
+    }
   }
 
   if (definition.type === 'string' || definition.type === 'text') {

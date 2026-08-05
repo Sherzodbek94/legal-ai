@@ -30,6 +30,14 @@ export interface VariableDefinition {
   required?: boolean;
   description?: string;
   defaultValue?: string | number | boolean;
+  /**
+   * Rendered inside the compact form's disclosure rather than in the main list.
+   *
+   * The API guarantees an advanced variable is either optional or carries a
+   * `defaultValue`, so leaving the disclosure closed always produces a valid
+   * submission. The form relies on that: it never validates the flag itself.
+   */
+  advanced?: boolean;
   minLength?: number;
   maxLength?: number;
   pattern?: string;

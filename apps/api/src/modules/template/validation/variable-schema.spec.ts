@@ -228,3 +228,112 @@ describe('parseVariableSchema', () => {
     });
   });
 });
+
+/**
+ * The `advanced` flag — what the compact form is allowed to hide.
+ *
+ * The shipped employment contract declares 31 variables, 30 required. Most are
+ * statutory or house-standard figures identical on every contract; a handful
+ * are the particulars of this hire. Splitting them is what makes the form
+ * fillable — but only if hiding a field never makes the form unsubmittable.
+ */
+describe('advanced variables', () => {
+  const schema = (variable: Record<string, unknown>) =>
+    parseVariableSchema({ version: 1, variables: [variable] }).variables[0];
+
+  const issuesFor = (variable: Record<string, unknown>) => {
+    try {
+      parseVariableSchema({ version: 1, variables: [variable] });
+      return [];
+    } catch (error) {
+      return (error as VariableSchemaError).issues;
+    }
+  };
+
+  it('marks an optional variable advanced', () => {
+    expect(
+      schema({ key: 'probation_months', label: 'Sinov', type: 'integer' }).advanced,
+    ).toBeUndefined();
+
+    expect(
+      schema({
+        key: 'probation_months',
+        label: 'Sinov',
+        type: 'integer',
+        advanced: true,
+      }).advanced,
+    ).toBe(true);
+  });
+
+  it('marks a required variable advanced when it has a default to fall back on', () => {
+    // Required *and* hidden is fine as long as leaving it alone still submits.
+    expect(
+      schema({
+        key: 'annual_leave_days',
+        label: "Yillik ta'til",
+        type: 'integer',
+        required: true,
+        defaultValue: 21,
+        advanced: true,
+      }).advanced,
+    ).toBe(true);
+  });
+
+  it('refuses to hide a required variable with nothing to fall back on', () => {
+    // Otherwise the compact form silently omits a field the API will demand,
+    // and the drafter gets a rejection naming a variable they never saw.
+    const issues = issuesFor({
+      key: 'monthly_salary',
+      label: 'Oylik ish haqi',
+      type: 'money',
+      required: true,
+      advanced: true,
+    });
+
+    expect(issues).toHaveLength(1);
+    expect(issues[0].path).toBe('variables[0].advanced');
+    expect(issues[0].message).toMatch(/required with no defaultValue/);
+  });
+
+  it('rejects rather than quietly downgrading to advanced: false', () => {
+    // An author who wrote `advanced: true` believes the field needs no
+    // attention. Accepting the schema with the flag dropped would leave them
+    // with a form they think is compact and is not.
+    expect(() =>
+      parseVariableSchema({
+        version: 1,
+        variables: [
+          { key: 'x', label: 'X', type: 'string', required: true, advanced: true },
+        ],
+      }),
+    ).toThrow(VariableSchemaError);
+  });
+
+  it('ignores a non-true advanced value rather than guessing', () => {
+    for (const advanced of [false, 'yes', 1, null]) {
+      expect(
+        schema({ key: 'x', label: 'X', type: 'string', advanced }).advanced,
+      ).toBeUndefined();
+    }
+  });
+
+  it('lets a required enum with a default be advanced', () => {
+    // The shape most house-standard clauses take: a fixed set of answers, one
+    // of which is the usual one.
+    const variable = schema({
+      key: 'contract_duration_type',
+      label: 'Shartnoma muddati turi',
+      type: 'enum',
+      required: true,
+      options: [
+        { value: 'muddatsiz', label: 'Muddatsiz' },
+        { value: 'muddatli', label: 'Muddatli' },
+      ],
+      defaultValue: 'muddatsiz',
+      advanced: true,
+    });
+
+    expect(variable.advanced).toBe(true);
+    expect(variable.options).toHaveLength(2);
+  });
+});

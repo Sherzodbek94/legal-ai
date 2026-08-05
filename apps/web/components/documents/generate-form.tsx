@@ -56,6 +56,23 @@ export function GenerateForm({
 
   const declared = new Set(definitions.map((definition) => definition.key));
 
+  /**
+   * The compact form is the essential fields; the rest sit behind a disclosure.
+   *
+   * The API guarantees an advanced variable is optional or carries a default,
+   * so a drafter who never opens the disclosure still submits successfully —
+   * this component does not re-check that.
+   */
+  const essential = definitions.filter((definition) => !definition.advanced);
+  const advanced = definitions.filter((definition) => definition.advanced);
+
+  const valueFor = (definition: VariableDefinition) =>
+    applied[definition.key] ?? companyDefaults[definition.key];
+
+  const advancedHasError = advanced.some(
+    (definition) => state.fieldErrors?.[definition.key],
+  );
+
   // Offered only when the template actually names a second party — most HR
   // orders and internal acts have none, and the panel would be noise there.
   const showLookup =
@@ -111,19 +128,52 @@ export function GenerateForm({
           This template declares no variables — its text is used as published.
         </p>
       ) : (
-        <fieldset className="space-y-5">
-          <legend className="text-sm font-medium">Variables</legend>
-          {definitions.map((definition) => (
-            <Field
-              key={`${definition.key}:${revision}`}
-              definition={definition}
-              defaultValue={
-                applied[definition.key] ?? companyDefaults[definition.key]
-              }
-              error={state.fieldErrors?.[definition.key]}
-            />
-          ))}
-        </fieldset>
+        <>
+          <fieldset className="space-y-5">
+            <legend className="text-sm font-medium">Variables</legend>
+            {essential.map((definition) => (
+              <Field
+                key={`${definition.key}:${revision}`}
+                definition={definition}
+                defaultValue={valueFor(definition)}
+                error={state.fieldErrors?.[definition.key]}
+              />
+            ))}
+          </fieldset>
+
+          {advanced.length > 0 ? (
+            <details
+              className="rounded-md border border-border"
+              // Opened when the server rejected one of the hidden fields.
+              // Otherwise the error renders inside a closed disclosure and the
+              // form looks like it failed for no reason.
+              open={advancedHasError}
+            >
+              <summary className="cursor-pointer px-4 py-3 text-sm font-medium">
+                Additional terms
+                <span className="ml-2 font-normal text-muted-foreground">
+                  {advanced.length} standard {advanced.length === 1 ? 'field' : 'fields'}
+                  , already set
+                </span>
+              </summary>
+
+              <fieldset className="space-y-5 border-t border-border px-4 py-4">
+                {/* These are statutory or house-standard figures, identical on
+                    almost every contract. They are editable — a term the law
+                    sets a floor for can still be improved on — but they should
+                    not stand between a drafter and a routine document. */}
+                {advanced.map((definition) => (
+                  <Field
+                    key={`${definition.key}:${revision}`}
+                    definition={definition}
+                    defaultValue={valueFor(definition)}
+                    error={state.fieldErrors?.[definition.key]}
+                  />
+                ))}
+              </fieldset>
+            </details>
+          ) : null}
+        </>
       )}
 
       <div className="space-y-3 rounded-md border border-border p-4">

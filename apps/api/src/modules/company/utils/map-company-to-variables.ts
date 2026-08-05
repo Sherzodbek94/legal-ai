@@ -26,6 +26,30 @@ export interface MappableCompany {
 
 export type CompanyVariables = Record<string, string>;
 
+/**
+ * Alternative keys the same value is also published under.
+ *
+ * Templates are authored data, not code: whoever writes one picks the
+ * placeholder names, and they do not consult this file. The shipped employment
+ * contract asks for `company_tin`, `company_address` and
+ * `company_representative_name`, while this mapper emits `company_stir`,
+ * `company_legal_address` and `company_director_name` — so four of its eight
+ * employer fields silently arrived blank and had to be typed by hand, on a form
+ * whose whole point is that they are already known.
+ *
+ * Aliasing here rather than renaming the template's keys, because the keys are
+ * recorded in every document already generated from it: renaming would make
+ * those `promptVariables` unreadable against the current schema, which is the
+ * record of what a signed contract was built from.
+ */
+const ALIASES: Record<string, string[]> = {
+  company_stir: ['company_tin', 'company_inn'],
+  company_legal_address: ['company_address'],
+  company_director_name: ['company_representative_name'],
+  company_director_position: ['company_representative_position'],
+  company_legal_name: ['company_full_name'],
+};
+
 export interface MapCompanyOptions {
   /**
    * Include keys whose value is absent, mapped to ''. Off by default so a
@@ -98,20 +122,26 @@ export function mapCompanyToVariables(
 
   const result: CompanyVariables = {};
 
+  /** Writes a value under its canonical key and every alias of that key. */
+  const publish = (key: string, value: string) => {
+    result[key] = value;
+    for (const alias of ALIASES[key] ?? []) result[alias] = value;
+  };
+
   for (const [key, value] of Object.entries(raw)) {
     if (value === null || value === undefined) {
-      if (includeEmpty) result[key] = '';
+      if (includeEmpty) publish(key, '');
       continue;
     }
 
     const cleaned = sanitize(String(value), maxValueLength);
 
     if (!cleaned) {
-      if (includeEmpty) result[key] = '';
+      if (includeEmpty) publish(key, '');
       continue;
     }
 
-    result[key] = cleaned;
+    publish(key, cleaned);
   }
 
   return result;
