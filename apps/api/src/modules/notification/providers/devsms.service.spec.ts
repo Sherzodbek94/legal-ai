@@ -216,6 +216,113 @@ describe('DevSmsService', () => {
     });
   });
 
+  describe('sendOtp', () => {
+    /**
+     * Sign-in codes go through `universal_otp` rather than `send`, because the
+     * operators only carry approved wording. Getting this payload wrong does not
+     * fail loudly — the gateway accepts the message, bills for it, and does not
+     * deliver it — so the shape is asserted field by field.
+     */
+    it('asks for the universal_otp template with the code and service name', async () => {
+      const { service, post } = build({
+        DEVSMS_TOKEN: 't',
+        DEVSMS_SERVICE_NAME: 'LegalTech',
+      });
+
+      await service.sendOtp('998901234567', '482913');
+
+      expect(post.mock.calls[0][1]).toEqual({
+        phone: '998901234567',
+        type: 'universal_otp',
+        template_type: 4,
+        service_name: 'LegalTech',
+        otp_code: '482913',
+      });
+    });
+
+    it('never sends a sender id with an OTP', async () => {
+      // The template carries DevSMS's own approved sender. Overriding it is what
+      // would put the message back in front of a moderator.
+      const { service, post } = build({ DEVSMS_TOKEN: 't', DEVSMS_FROM: 'MyBrand' });
+
+      await service.sendOtp('998901234567', '482913');
+
+      expect(post.mock.calls[0][1]).not.toHaveProperty('from');
+    });
+
+    it('honours a configured template type', async () => {
+      const { service, post } = build({
+        DEVSMS_TOKEN: 't',
+        DEVSMS_OTP_TEMPLATE: '3',
+      });
+
+      await service.sendOtp('998901234567', '482913');
+
+      expect(post.mock.calls[0][1]).toMatchObject({ template_type: 3 });
+    });
+
+    it('returns the message id like any other send', async () => {
+      const { service } = build();
+
+      expect(await service.sendOtp('998901234567', '482913')).toEqual({
+        providerMessageId: '123',
+      });
+    });
+
+    describe('refusing to spend on a request the gateway will reject', () => {
+      // DevSMS bills for a message refused over the business name, so each of
+      // these must be caught before the request leaves.
+      it.each([
+        ['a name that is too short', { DEVSMS_SERVICE_NAME: 'L' }, '482913'],
+        ['a name that is too long', { DEVSMS_SERVICE_NAME: 'x'.repeat(51) }, '482913'],
+        ['a blank name', { DEVSMS_SERVICE_NAME: '   ' }, '482913'],
+        ['a code that is too short', {}, '123'],
+        ['a code that is too long', {}, '123456789'],
+        ['a non-numeric code', {}, '12ab56'],
+        ['an out-of-range template', { DEVSMS_OTP_TEMPLATE: '9' }, '482913'],
+        ['an unparseable template', { DEVSMS_OTP_TEMPLATE: 'four' }, '482913'],
+      ])('refuses %s', async (_case, config, code) => {
+        const { service, post } = build({ DEVSMS_TOKEN: 't', ...config });
+
+        await expect(
+          service.sendOtp('998901234567', code as string),
+        ).rejects.toMatchObject({ kind: 'misconfigured' });
+        expect(post).not.toHaveBeenCalled();
+      });
+    });
+
+    it('trims a padded service name rather than rejecting it', async () => {
+      const { service, post } = build({
+        DEVSMS_TOKEN: 't',
+        DEVSMS_SERVICE_NAME: '  LegalTech  ',
+      });
+
+      await service.sendOtp('998901234567', '482913');
+
+      expect(post.mock.calls[0][1]).toMatchObject({ service_name: 'LegalTech' });
+    });
+
+    it('still refuses an invalid number before spending', async () => {
+      const { service, post } = build();
+
+      await expect(service.sendOtp('12345', '482913')).rejects.toMatchObject({
+        kind: 'permanent',
+      });
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it('recognises a body-level refusal the same way', async () => {
+      const { service } = build(
+        { DEVSMS_TOKEN: 't' },
+        { success: false, error: 'Korxona nomi nomaqbul' },
+      );
+
+      await expect(service.sendOtp('998901234567', '482913')).rejects.toThrow(
+        /Korxona nomi nomaqbul/,
+      );
+    });
+  });
+
   describe('balance warning', () => {
     /**
      * The live API answers with decimal strings — `"balance": "400.00"` — where

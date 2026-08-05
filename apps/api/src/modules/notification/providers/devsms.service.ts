@@ -104,11 +104,129 @@ export class DevSmsService {
     return this.config.get<string>('DEVSMS_TYPE', '');
   }
 
+  /**
+   * Business name substituted into the OTP template.
+   *
+   * Not a sender id — the sender is DevSMS's own approved one. This is the name
+   * that appears inside the message text, and it is what their AI moderation
+   * judges. A name it rejects is charged for and not delivered, so `sendOtp`
+   * checks the documented 2–50 character bound before spending anything.
+   */
+  private get serviceName(): string {
+    return this.config.get<string>('DEVSMS_SERVICE_NAME', 'LegalTech');
+  }
+
+  /**
+   * Which pre-approved OTP template to use: 1 confirms an action, 2 resets a
+   * password, 3 registers, 4 signs in. Defaults to 4 because one code here does
+   * both jobs — a first code to an unknown number creates the account — and
+   * "kirish" reads correctly for a returning user and a new one alike.
+   */
+  private get otpTemplate(): number {
+    // Coerced rather than asserted: `numericConfig` normally turns this into a
+    // number, but a value that reaches ConfigService by another route is still a
+    // string, and `Number.isInteger('4')` is false. Garbage becomes NaN and is
+    // rejected loudly by the caller rather than silently defaulting — a typo'd
+    // template would otherwise send the wrong message for months.
+    const raw = this.config.get<number | string>('DEVSMS_OTP_TEMPLATE', 4);
+    return typeof raw === 'number' ? raw : Number(raw);
+  }
+
   isConfigured(): boolean {
     return Boolean(this.token);
   }
 
+  /**
+   * Sends arbitrary text.
+   *
+   * Uzbek operators moderate message templates, so text that has not been
+   * approved on the account may be accepted here and never delivered. Fine for
+   * notifications, which are not time-critical and can be chased through
+   * another channel. Not fine for a login code — use `sendOtp` for those.
+   */
   async send(phone: string, message: string): Promise<SmsResult> {
+    const normalized = this.prepare(phone);
+
+    if (this.from === '4546') {
+      this.logger.warn(
+        'Sending via DevSMS\'s default sender (4546) with unmoderated text; delivery is not guaranteed',
+      );
+    }
+
+    return this.dispatch(
+      {
+        phone: normalized,
+        message,
+        from: this.from,
+        ...(this.gatewayType ? { type: this.gatewayType } : {}),
+      },
+      'send',
+    );
+  }
+
+  /**
+   * Sends a one-time code through DevSMS's pre-approved OTP templates.
+   *
+   * The reason this exists separately from `send`: the message text is not ours
+   * to choose. Operators here require templates to be approved before they will
+   * carry them, and getting a custom one approved — or a branded sender id —
+   * takes weeks. `universal_otp` borrows a template that is already approved, so
+   * only the business name and the code are ours to supply and a new account can
+   * deliver codes on day one.
+   *
+   * The cost of that is a fixed wording: the expiry hint the old text carried
+   * ("Kod 5 daqiqa amal qiladi") is gone, because the template has no room for
+   * it. The UI states the expiry anyway, which is where it is actually readable.
+   */
+  async sendOtp(phone: string, code: string): Promise<SmsResult> {
+    const normalized = this.prepare(phone);
+
+    // Both bounds are the gateway's, and both are checked here rather than
+    // discovered from a rejection — DevSMS documents that a message refused
+    // over the business name is still billed, and a code that costs money and
+    // never arrives is the worst outcome available.
+    const name = this.serviceName.trim();
+    if (name.length < 2 || name.length > 50) {
+      throw new DeliveryError(
+        `DEVSMS_SERVICE_NAME must be 2-50 characters; got ${name.length}`,
+        'misconfigured',
+      );
+    }
+
+    if (!/^\d{4,8}$/.test(code)) {
+      // Almost always OTP_CODE_LENGTH set outside the range the template
+      // accepts, which is a configuration error rather than a bad request.
+      throw new DeliveryError(
+        `DevSMS OTP templates take a 4-8 digit code; got ${code.length} digits`,
+        'misconfigured',
+      );
+    }
+
+    const template = this.otpTemplate;
+    if (!Number.isInteger(template) || template < 1 || template > 4) {
+      throw new DeliveryError(
+        `DEVSMS_OTP_TEMPLATE must be 1, 2, 3 or 4; got ${template}`,
+        'misconfigured',
+      );
+    }
+
+    return this.dispatch(
+      {
+        phone: normalized,
+        type: 'universal_otp',
+        template_type: template,
+        service_name: name,
+        // No `from`: the template carries DevSMS's own approved sender, and
+        // overriding it is what would put the message back in front of a
+        // moderator.
+        otp_code: code,
+      },
+      'OTP send',
+    );
+  }
+
+  /** Shared preflight: refuse early rather than pay to be told. */
+  private prepare(phone: string): string {
     if (!this.isConfigured()) {
       throw new DeliveryError('DEVSMS_TOKEN is not configured', 'misconfigured');
     }
@@ -123,22 +241,19 @@ export class DevSmsService {
       );
     }
 
-    if (this.from === '4546') {
-      this.logger.warn(
-        'Sending via the shared test sender (4546); only numbers registered on the account will receive it',
-      );
-    }
+    return normalized;
+  }
 
+  /** One POST to `send_sms.php`, whichever kind of message it carries. */
+  private async dispatch(
+    payload: Record<string, unknown>,
+    what: string,
+  ): Promise<SmsResult> {
     try {
       const response = await firstValueFrom(
         this.http.post<DevSmsEnvelope<SendData>>(
           `${this.baseUrl}/send_sms.php`,
-          {
-            phone: normalized,
-            message,
-            from: this.from,
-            ...(this.gatewayType ? { type: this.gatewayType } : {}),
-          },
+          payload,
           {
             headers: {
               Authorization: `Bearer ${this.token}`,
@@ -149,7 +264,7 @@ export class DevSmsService {
         ),
       );
 
-      const data = this.unwrap(response.data, 'send');
+      const data = this.unwrap(response.data, what);
 
       // Nothing is wrong with THIS message — it was sent. The next one may not
       // be, and an OTP that cannot be delivered locks people out of the product

@@ -184,12 +184,14 @@ export class OtpService {
   private async deliver(phone: string, code: string): Promise<void> {
     if (this.sms.isConfigured()) {
       try {
-        // `send` throws a DeliveryError rather than returning a status — an
-        // invalid number is permanent and billable, so it must not be retried.
-        await this.sms.send(
-          phone,
-          `LegalTech AI: ${code}. Kod ${Math.round(this.ttlSeconds / 60)} daqiqa amal qiladi. Hech kimga aytmang.`,
-        );
+        // `sendOtp`, not `send`: operators only carry message text they have
+        // approved, and the OTP templates are approved already. Custom wording
+        // would be accepted by the gateway and quietly not delivered — which for
+        // a login code is indistinguishable from the account being broken.
+        //
+        // It throws a DeliveryError rather than returning a status: an invalid
+        // number is permanent and billable, so it must not be retried.
+        await this.sms.sendOtp(phone, code);
       } catch (error) {
         this.logger.error(
           `OTP delivery failed for ${maskPhone(phone)}: ${(error as Error)?.message ?? 'unknown error'}`,

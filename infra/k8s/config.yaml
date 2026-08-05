@@ -69,6 +69,9 @@ data:
 
   # --- Notifications ---------------------------------------------------------
   DEVSMS_BASE_URL: "https://devsms.uz/api"
+  # Sign-in codes go through the pre-approved OTP template; 4 is "sign in".
+  DEVSMS_OTP_TEMPLATE: "4"
+  DEVSMS_SERVICE_NAME: "LegalTech"
   EMAIL_FROM: "LegalTech <no-reply@legaltech.example.com>"
 
   # --- Payments --------------------------------------------------------------
