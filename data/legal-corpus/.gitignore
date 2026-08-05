@@ -1,0 +1,6 @@
+# Act files are legislative text obtained under someone else's terms, and a git
+# history is a redistribution. They belong in the deployment, not the
+# repository — see README.md.
+*.txt
+*.md
+!README.md
