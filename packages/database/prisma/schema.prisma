@@ -193,13 +193,38 @@ enum AuditAction {
 // ---------------------------------------------------------------------------
 
 model User {
-  id            String    @id @default(cuid())
-  email         String    @unique
+  id String @id @default(cuid())
+
+  /// Nullable because an account can be created from a phone number alone —
+  /// SMS sign-in is the ordinary path in this market, and demanding an email
+  /// before a user can receive their own code puts a form in front of the
+  /// simplest way in. Postgres allows any number of NULLs under a unique
+  /// index, so this stays a unique identifier for everyone who has one.
+  email         String?   @unique
   passwordHash  String?
   name          String?
   role          UserRole  @default(USER)
   emailVerified DateTime?
   lastLoginAt   DateTime?
+
+  /// OneID (id.egov.uz) subject identifier, bound on first successful login.
+  /// Present only for accounts that have ever signed in through OneID. Once
+  /// set, subsequent OneID logins must match it — an email collision must
+  /// never silently authenticate as a different citizen's account.
+  oneIdSubject String? @unique
+
+  /// Google's `sub` claim, bound on first successful Google sign-in. Same rule
+  /// as `oneIdSubject`: stable where an email address is not, because Google
+  /// accounts can change their address and addresses can be reassigned.
+  googleSubject String? @unique
+
+  /// E.164, the number SMS one-time codes are sent to and signed in with.
+  /// Unique because it is a login identifier in its own right — two accounts
+  /// sharing a number would make "who does this code belong to" unanswerable.
+  /// Distinct from `NotificationPreference.phone`, which is where a user wants
+  /// alerts delivered and may legitimately differ.
+  phone         String?   @unique
+  phoneVerified DateTime?
 
   // --- Administrative lock ---------------------------------------------------
   /// Set while the account is suspended. A locked user is refused at token
@@ -217,7 +242,9 @@ model User {
   auditLogs          AuditLog[]
   templateVersions   TemplateVersion[]
   approvalDecisions  DocumentApproval[]
-  submittedDocuments GeneratedDocument[] @relation("DocumentSubmittedBy")
+  submittedDocuments GeneratedDocument[]        @relation("DocumentSubmittedBy")
+  documentVersions   GeneratedDocumentVersion[] @relation("DocumentVersionEditor")
+  chatConversations  ChatConversation[]
   aiUsage            AiUsageRecord[]
 
   impersonationsPerformed ImpersonationSession[] @relation("ImpersonationActor")
@@ -225,6 +252,7 @@ model User {
 
   notifications          Notification[]
   notificationPreference NotificationPreference?
+  invitationsSent        CompanyInvitation[]     @relation("InvitationInvitedBy")
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -297,6 +325,7 @@ model Company {
   templates           DocumentTemplate[]
   templateCategories  TemplateCategory[]
   generatedDocuments  GeneratedDocument[]
+  chatConversations   ChatConversation[]
   subscription        Subscription?
   paymentTransactions PaymentTransaction[]
   auditLogs           AuditLog[]
@@ -316,6 +345,7 @@ model Company {
   scannedDocuments  ScannedDocument[]
   documentChunks    DocumentChunk[]
   notifications     Notification[]
+  invitations       CompanyInvitation[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -324,6 +354,44 @@ model Company {
   @@index([deletedAt])
   @@index([stir])
   @@map("companies")
+}
+
+/// A pending invitation to join a company.
+///
+/// Separate from `CompanyMember` because an invitee usually has no account
+/// yet: `CompanyMember` is keyed on `userId` and cannot represent "this email
+/// address has been asked to join". The row is consumed at acceptance, which
+/// is when the `CompanyMember` is finally written.
+model CompanyInvitation {
+  id        String            @id @default(cuid())
+  companyId String
+  company   Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  email     String
+  role      CompanyMemberRole @default(ATTORNEY)
+
+  /// SHA-256 of the token that was emailed. Only the hash is stored, so a
+  /// database disclosure cannot be replayed against the accept endpoint — the
+  /// same rule `RefreshToken` follows.
+  tokenHash String @unique
+
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  /// Set when an owner withdraws an invitation before it is accepted. Kept
+  /// rather than deleted so "who invited whom, and who took it back" survives.
+  revokedAt  DateTime?
+
+  invitedById String?
+  invitedBy   User?   @relation("InvitationInvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// One live invitation per address per company. Partial, so a withdrawn or
+  /// accepted invitation does not block re-inviting the same person — enforced
+  /// in the migration, since Prisma cannot express a filtered unique index.
+  @@index([companyId, email])
+  @@index([expiresAt])
+  @@map("company_invitations")
 }
 
 enum CompanyAssetType {
@@ -607,12 +675,16 @@ model GeneratedDocument {
 
   // --- Approval workflow ----------------------------------------------------
   approvals       DocumentApproval[]
+  /// Prior states of the body; see GeneratedDocumentVersion.
+  versions        GeneratedDocumentVersion[]
+  /// Current revision number. Starts at 1; every saved edit increments it.
+  revision        Int                        @default(1)
   /// Incremented on every submission. A rejected document that is corrected and
   /// resubmitted opens a new round, leaving the previous decisions on record.
-  approvalRound   Int                @default(0)
+  approvalRound   Int                        @default(0)
   submittedAt     DateTime?
   submittedById   String?
-  submittedBy     User?              @relation("DocumentSubmittedBy", fields: [submittedById], references: [id], onDelete: SetNull)
+  submittedBy     User?                      @relation("DocumentSubmittedBy", fields: [submittedById], references: [id], onDelete: SetNull)
   completedAt     DateTime?
   rejectionReason String?
 
@@ -1329,4 +1401,233 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([action, createdAt])
   @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Legislation corpus
+// ---------------------------------------------------------------------------
+
+/// Kind of normative act, per the classification in O'RQ-682 ("Normativ-huquqiy
+/// hujjatlar to'g'risida"). Retrieval is routinely filtered by this: a question
+/// about contract formation wants the Civil Code, not a ministerial instruction.
+enum LegalActType {
+  CONSTITUTION
+  CODE
+  LAW
+  PRESIDENTIAL_DECREE
+  PRESIDENTIAL_RESOLUTION
+  CABINET_RESOLUTION
+  MINISTERIAL_ACT
+  COURT_PRACTICE
+  OTHER
+}
+
+/// Whether the act still binds anyone.
+///
+/// The distinction retrieval depends on. Citing a repealed article is worse
+/// than finding nothing: it is confidently wrong, in a document someone signs.
+enum LegalActStatus {
+  IN_FORCE
+  AMENDED
+  REPEALED
+  UNKNOWN
+}
+
+/// One normative act, in one language.
+///
+/// Deliberately NOT tenant-scoped — unlike every other content table here.
+/// Legislation is the same for every customer, and giving each tenant a private
+/// copy would multiply the embedding bill by the customer count while making
+/// "is this article still in force" a question with different answers per
+/// tenant. The tenant-scoped corpus is `DocumentChunk`, which indexes a
+/// company's own uploaded scans; the two are searched separately and cited
+/// differently.
+///
+/// One row per language rather than columns per language: Uzbek Latin, Uzbek
+/// Cyrillic, and Russian texts of the same act are separate official texts with
+/// their own article wording, and each has to be embedded and cited in its own
+/// right.
+model LegalAct {
+  id String @id @default(cuid())
+
+  /// Which ingestion source produced this, e.g. `lex.uz`.
+  source     String
+  /// The source's own identifier, for re-ingest and for building a citation URL.
+  externalId String
+  url        String?
+
+  type     LegalActType
+  /// Official number, e.g. `O'RQ-682`. Absent for some older acts.
+  number   String?
+  title    String
+  /// BCP 47: `uz-Latn`, `uz-Cyrl`, `ru`.
+  language String
+
+  adoptedAt     DateTime?
+  effectiveFrom DateTime?
+  status        LegalActStatus @default(UNKNOWN)
+
+  /// Source-supplied version marker. A re-ingest compares this before spending
+  /// anything on re-embedding — legislation changes rarely, and re-embedding an
+  /// unchanged code is the most expensive no-op available here.
+  revision String?
+
+  /// Full normalised text, retained so chunking can be re-run after a change to
+  /// the splitter without re-fetching from the source.
+  content String
+
+  chunks LegalActChunk[]
+
+  ingestedAt DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  /// Set instead of deleting, so a citation already stored in a generated
+  /// document still resolves to something.
+  retiredAt  DateTime?
+
+  @@unique([source, externalId, language])
+  @@index([type, status])
+  @@index([status, retiredAt])
+  @@map("legal_acts")
+}
+
+/// One passage of an act, embedded and indexed for retrieval.
+///
+/// Split on article boundaries rather than a fixed token count wherever the
+/// text exposes them — see `splitIntoArticles`. An article IS the unit a lawyer
+/// cites, so a chunk that corresponds to one produces a citation that is exact
+/// rather than approximate, and a retrieved passage that answers the whole
+/// question rather than half of it.
+model LegalActChunk {
+  id    String   @id @default(cuid())
+  actId String
+  act   LegalAct @relation(fields: [actId], references: [id], onDelete: Cascade)
+
+  /// 0-based position within the act.
+  chunkIndex   Int
+  /// The article this passage belongs to, as it should be cited — e.g. `347`.
+  /// Null where the text had no article structure to split on.
+  articleLabel String?
+  /// Set when one article was too long for a single passage, so a citation can
+  /// say which part. Null when the chunk is the whole article.
+  articlePart  Int?
+
+  content    String
+  tokenCount Int
+
+  embeddingModel String                       @default("text-embedding-3-small")
+  /// Written by a follow-up `$executeRaw`; `Unsupported` columns are not
+  /// writable through the generated client.
+  embedding      Unsupported("vector(1536)")?
+
+  /// Generated column, `to_tsvector('simple', content)`. Same configuration
+  /// choice as `document_chunks` — see that migration for why not 'russian'.
+  searchVector Unsupported("tsvector")?
+
+  createdAt DateTime @default(now())
+
+  @@unique([actId, chunkIndex])
+  @@index([actId, articleLabel])
+  @@map("legal_act_chunks")
+}
+
+/// A saved state of a document's body, kept so an edit can be undone.
+///
+/// Snapshots the state *before* each save rather than after it. That ordering
+/// is what makes "restore" mean something: the list is the states the document
+/// has passed through, and the live row is the current one — which is where a
+/// reader already looks. Snapshotting after each save would duplicate the live
+/// content into the newest version and leave the original first edit unrecorded.
+///
+/// Not soft-deleted and not editable. A version is a record of what a document
+/// said at a point in time; a version somebody can revise is not a record.
+model GeneratedDocumentVersion {
+  id         String            @id @default(cuid())
+  documentId String
+  document   GeneratedDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  /// 1-based, dense, and assigned under the same transaction as the write that
+  /// created it — two people saving at once must not both take number 4.
+  version Int
+
+  title   String
+  content Json?
+
+  /// Who made the edit that displaced this state.
+  editedById String?
+  editedBy   User?   @relation("DocumentVersionEditor", fields: [editedById], references: [id], onDelete: SetNull)
+
+  /// Approval round the document was in when this state was displaced, so the
+  /// history shows which edits happened before a submission and which after a
+  /// rejection.
+  approvalRound Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@unique([documentId, version])
+  @@index([documentId, createdAt])
+  @@map("generated_document_versions")
+}
+
+// ---------------------------------------------------------------------------
+// Legal chat
+// ---------------------------------------------------------------------------
+
+/// A question-and-answer thread about Uzbek law.
+///
+/// Tenant-scoped, because a thread routinely quotes the company's own
+/// documents back at the model: the retrieval half searches both the shared
+/// statute corpus and this company's scans, and the second of those is private.
+model ChatConversation {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Derived from the first question, so a sidebar has something to show.
+  title String
+
+  messages ChatMessage[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([companyId, userId, updatedAt])
+  @@map("chat_conversations")
+}
+
+enum ChatRole {
+  USER
+  ASSISTANT
+}
+
+/// One turn.
+///
+/// An assistant turn carries the sources it was given AND the ones it claimed
+/// to use — see `ChatService`. Storing both is what makes a past answer
+/// auditable: "which article did it rely on" is exactly the question somebody
+/// asks when a clause turns out to be wrong.
+model ChatMessage {
+  id             String           @id @default(cuid())
+  conversationId String
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  role    ChatRole
+  content String
+
+  /// `[{ kind, refId, citation, url }]` — the sources the answer cited.
+  citations Json?
+
+  /// Provider and model that produced an assistant turn; null for a user turn.
+  provider String?
+  model    String?
+
+  /// True when retrieval found nothing and the answer had to say so.
+  ungrounded Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, createdAt])
+  @@map("chat_messages")
 }
