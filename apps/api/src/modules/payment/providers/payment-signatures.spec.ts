@@ -18,6 +18,10 @@ import {
   parseStripeSignatureHeader,
   verifyStripeSignature,
 } from './stripe/stripe-signature';
+import type { ConfigService } from '@nestjs/config';
+import { UzumService } from './uzum/uzum.service';
+import type { PaymentService } from '../payment.service';
+import type { IdempotencyService } from '../idempotency/idempotency.service';
 
 describe('CLICK signatures', () => {
   const SECRET = 'secret-key';
@@ -286,5 +290,165 @@ describe('Stripe signatures', () => {
         now: NOW,
       }).valid,
     ).toBe(true);
+  });
+});
+
+/**
+ * Uzum.
+ *
+ * The gateway the other three's protections were never extended to: until this
+ * block there was no test anywhere that a forged Uzum callback is rejected,
+ * which made it the one place a wrong signature could have gone unnoticed.
+ *
+ * The base string itself is ASSUMED — Uzum issues its integration contract per
+ * merchant and this implements the shape their public checkout documentation
+ * describes. These tests therefore pin what the code does, not what the
+ * contract says. They will keep passing if the two disagree; reconciling them
+ * is a separate, manual job against the issued contract. What they do
+ * guarantee is that the protections around the base string hold, and that any
+ * future change to it is deliberate rather than accidental.
+ */
+describe('Uzum signatures', () => {
+  const SECRET = 'uzum-secret';
+  const MERCHANT = 'merchant-1';
+
+  const CALLBACK = {
+    operation: 'confirm' as const,
+    transactionId: 'utx-900001',
+    orderId: 'order_1',
+    amount: 4_900_000,
+    signature: '',
+  };
+
+  function build(settings: Record<string, string> = {}) {
+    const config = {
+      get: (key: string, fallback?: string) =>
+        ({ UZUM_SECRET_KEY: SECRET, UZUM_MERCHANT_ID: MERCHANT, ...settings })[key] ??
+        fallback ??
+        '',
+    } as unknown as ConfigService;
+
+    return new UzumService(
+      {} as unknown as PaymentService,
+      {} as unknown as IdempotencyService,
+      config,
+    );
+  }
+
+  /** A correctly signed copy of a callback. */
+  function signed(overrides: Partial<typeof CALLBACK> = {}) {
+    const service = build();
+    const dto = { ...CALLBACK, ...overrides };
+    return { service, dto: { ...dto, signature: service.buildSignature(dto) } };
+  }
+
+  it('signs transactionId, orderId, amount and merchantId, in that order', () => {
+    // Field order is the protocol. An object-key or alphabetical order would
+    // produce a digest that never matches Uzum's.
+    const expected = createHmac('sha256', SECRET)
+      .update(['utx-900001', 'order_1', '4900000', MERCHANT].join('|'))
+      .digest('hex');
+
+    expect(build().buildSignature(CALLBACK)).toBe(expected);
+  });
+
+  it('signs the amount as integer minor units', () => {
+    // A float-formatted amount ("49000.00") digests differently and would make
+    // every genuine callback fail. Minor units everywhere is the house rule.
+    const asFloat = createHmac('sha256', SECRET)
+      .update(['utx-900001', 'order_1', '4900000.00', MERCHANT].join('|'))
+      .digest('hex');
+
+    expect(build().buildSignature(CALLBACK)).not.toBe(asFloat);
+  });
+
+  it('accepts a correctly signed callback', () => {
+    const { service, dto } = signed();
+    expect(service.verifySignature(dto)).toBe(true);
+  });
+
+  it('rejects a callback whose amount was altered after signing', () => {
+    // THE property. The amount is inside the signed base string, so raising it
+    // invalidates the signature — without that, a forged callback could settle
+    // an order for any figure it liked.
+    const { service, dto } = signed();
+
+    expect(service.verifySignature({ ...dto, amount: 999_999_999 })).toBe(false);
+  });
+
+  it('rejects a callback pointed at a different order', () => {
+    const { service, dto } = signed();
+
+    expect(service.verifySignature({ ...dto, orderId: 'order_2' })).toBe(false);
+  });
+
+  it('rejects a callback replayed under a different transaction id', () => {
+    const { service, dto } = signed();
+
+    expect(service.verifySignature({ ...dto, transactionId: 'utx-900002' })).toBe(false);
+  });
+
+  it('rejects a signature produced with another secret', () => {
+    const attacker = new UzumService(
+      {} as unknown as PaymentService,
+      {} as unknown as IdempotencyService,
+      {
+        get: (key: string) =>
+          ({ UZUM_SECRET_KEY: 'wrong-secret', UZUM_MERCHANT_ID: MERCHANT })[key] ?? '',
+      } as unknown as ConfigService,
+    );
+
+    const forged = { ...CALLBACK, signature: attacker.buildSignature(CALLBACK) };
+
+    expect(build().verifySignature(forged)).toBe(false);
+  });
+
+  it('accepts an uppercase signature', () => {
+    // Hex case carries no meaning, and a gateway that upper-cases its digest
+    // would otherwise have every callback rejected.
+    const { service, dto } = signed();
+
+    expect(service.verifySignature({ ...dto, signature: dto.signature.toUpperCase() })).toBe(
+      true,
+    );
+  });
+
+  it('fails closed when no secret is configured', () => {
+    // The secret is the only thing authenticating a payment confirmation. With
+    // none, every callback is rejected rather than accepted unsigned.
+    const service = build({ UZUM_SECRET_KEY: '' });
+
+    expect(service.verifySignature({ ...CALLBACK, signature: 'anything' })).toBe(false);
+  });
+
+  it.each([
+    ['', 'empty'],
+    [undefined, 'missing'],
+    [42, 'not a string'],
+  ])('rejects a %p signature (%s)', (signature, _description) => {
+      // A short or absent value must not reach timingSafeEqual, which throws on
+      // a length mismatch — a throw here would become a 500 instead of a clean
+      // rejection.
+      expect(
+        build().verifySignature({
+          ...CALLBACK,
+          signature: signature as unknown as string,
+        }),
+      ).toBe(false);
+    },
+  );
+
+  it('rejects a signature of the wrong length without throwing', () => {
+    expect(build().verifySignature({ ...CALLBACK, signature: 'abc123' })).toBe(false);
+  });
+
+  it('refuses the callback outright when the signature does not verify', async () => {
+    // The handler must stop before any payment state is touched: the stubbed
+    // PaymentService below would throw if it were reached.
+    const { dto } = signed();
+
+    await expect(
+      build().handle({ ...dto, amount: 1 } as never),
+    ).resolves.toEqual({ status: 'FAILED', errorCode: 'INVALID_SIGNATURE' });
   });
 });
