@@ -1,0 +1,17 @@
+{
+  "//": "Typechecks the Playwright suite. Separate from apps/api because these run in Playwright's own runtime, not under ts-jest, and must not be swept into the API build.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["e2e/**/*.ts", "../playwright.config.ts"],
+  "exclude": ["load/**"]
+}
