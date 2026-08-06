@@ -225,28 +225,55 @@ text. The visual half is not:
 - **Field rhythm.** Every field is the same width regardless of content. A
   five-digit MFO and a full legal address should not occupy the same box.
 
-### 4.5 Empty and error states
+### 4.5 ~~Empty and error states~~ Checked — already done
 
-Eighteen pages have no designed empty state. Each needs one line saying what
-goes there and one action that puts something there. This is small, mechanical,
-and the most visible quality difference per hour spent of anything in this
-document.
+An earlier revision claimed eighteen pages had no designed empty state, and
+ranked fixing them first. That came from one grep for the words "no results" and
+"empty", which is not how this codebase writes them.
+
+Audited properly: **31 empty states across twelve pages and three components**,
+via a shared `EmptyState` and a `TableEmpty` for tables. They already meet the
+standard that revision asked for — a line saying what goes there and how to put
+something there:
+
+> "No documents yet. Pick a published template to generate one."
+> "Nothing uploaded yet. Add a scan above to make it searchable."
+
+The ten files with no empty branch are collections that cannot be empty — the
+sidebar, the plan catalogue, the notification event list — or primitives. Both
+revenue charts handle zero too, through `total === 0` and `!anyMovement` rather
+than a length check, which is why the grep missed them.
+
+Nothing to do here.
 
 ---
 
 ## 5. Suggested order
 
-1. **4.5** — empty states. Mechanical, and the largest visible quality
-   difference per hour spent of anything here.
-2. **3.2** — asynchronous generation. The schema already describes the shape;
-   the timeout fix is a floor under the symptom, not a fix.
-3. **P1 template services** — publishing decides what every document is built
-   from and nothing tests it.
-4. **3.5** — the other four template forms, applying the employment pattern.
+1. **P1 template services** — publishing decides what every document is built
+   from and nothing tests it. Measured from coverage, not inferred.
+2. **3.2** — asynchronous generation. Verified: `GENERATING` appears twice in
+   the codebase, once as a locked status and once in a comment. Nothing sets
+   it. The timeout fix is a floor under the symptom, not a fix.
+3. **3.5** — the other four template forms, applying the employment pattern.
+4. **3.3** — the next few components, chosen the way the first three were.
 5. **4.2 / 4.3** — identity and typography, once someone has decided what the
    product is called.
 
-With 3.1 struck, there is no known bug a user has hit that is still open.
+### A note on this document's reliability
+
+Two of its original items — 3.1 and 4.5 — were wrong, and both in the same way:
+a grep was read as a finding. 3.1 inferred a broken error path from two log
+lines; 4.5 inferred missing empty states from a search for wording this codebase
+does not use. Both were ranked first at the time of writing.
+
+Everything now above the line was measured against the running system or read
+out of `coverage-summary.json`. The design section (4) is the weakest part of
+this document — 4.5 was in it — and its remaining claims are judgements about
+register and identity rather than counts, so treat them as opinions to argue
+with rather than findings to action.
+
+With 3.1 and 4.5 struck, there is no known user-visible defect still open.
 
 Items in section 2 run in parallel and are not on this critical path, except the
 corpus, which blocks the six defaults.
