@@ -100,14 +100,26 @@ Ordered by what it costs to leave alone.
 
 ### P0 — failures a user has already hit
 
-**3.1 Validation errors never reach the form.**
-Observed in the API log during a real session: two `POST /api/documents → 422
-Invalid variable values`, thirty seconds apart, while the button sat on
-"Generating…" and the page said nothing. The server action returned 200 in
-107ms both times, so the rejection existed and was discarded somewhere between
-the API and the UI. A drafter in that position has no way to learn which field
-is wrong. This is the single worst bug outstanding: it makes a precise error
-message look like a hang.
+**3.1 ~~Validation errors never reach the form.~~ Checked — they do.**
+An earlier revision of this document listed this as the worst outstanding bug,
+on the strength of two `POST /api/documents → 422` lines in the log of a real
+session that ended with a stuck "Generating…" button. That was an inference from
+a log, not a finding, and it was wrong.
+
+Tested against the running API: a create with missing variables returns 422
+carrying eighteen issues, every one of them shaped `{key, message}`, and every
+one passing the filter in `readErrorBody` that feeds `fieldErrors`. The chain —
+`UnprocessableEntityException` → `AllExceptionsFilter` nesting →
+`readErrorBody` unwrapping → server action → `state.fieldErrors[key]` — is
+intact end to end.
+
+What those two log lines actually show is the flow working: a drafter submitted,
+saw the fields marked, filled them in, submitted again, saw the remainder,
+filled those, and the third attempt got through to the AI — where it hung on the
+missing client timeout, which was the real bug and is fixed in `e9c5347`.
+
+Left in rather than deleted, because "we already looked at this" is worth more
+than a shorter document.
 
 **3.2 Generation is synchronous.**
 `GeneratedDocumentStatus.GENERATING` exists in the schema and nothing sets it.
@@ -224,15 +236,17 @@ document.
 
 ## 5. Suggested order
 
-1. **3.1** — validation errors reaching the form. Half a day, and it is a bug a
-   real user hit on a real screen.
-2. **4.5** — empty states. Mechanical, high visible return.
-3. **3.2** — asynchronous generation. The schema already describes it.
-4. **P1 template services** — publishing decides what every document is built
+1. **4.5** — empty states. Mechanical, and the largest visible quality
+   difference per hour spent of anything here.
+2. **3.2** — asynchronous generation. The schema already describes the shape;
+   the timeout fix is a floor under the symptom, not a fix.
+3. **P1 template services** — publishing decides what every document is built
    from and nothing tests it.
+4. **3.5** — the other four template forms, applying the employment pattern.
 5. **4.2 / 4.3** — identity and typography, once someone has decided what the
    product is called.
-6. **3.5** — the other four template forms, applying the employment pattern.
+
+With 3.1 struck, there is no known bug a user has hit that is still open.
 
 Items in section 2 run in parallel and are not on this critical path, except the
 corpus, which blocks the six defaults.
