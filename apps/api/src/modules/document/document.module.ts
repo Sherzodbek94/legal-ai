@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { BullModule } from '@nestjs/bullmq';
 import { TemplateModule } from '../template/template.module';
 import { CompanyModule } from '../company/company.module';
 import { AiEngineModule } from '../ai-engine/ai-engine.module';
@@ -7,6 +8,8 @@ import { DocumentController } from './document.controller';
 import { DocumentService } from './document.service';
 import { DocumentEditService } from './editing/document-edit.service';
 import { DocumentCreationService } from './creation/document-creation.service';
+import { DocumentGenerationProcessor } from './creation/document-generation.processor';
+import { QUEUE_NAMES } from '../notification/queues/queue.constants';
 import { BrowserService } from './generator/browser.service';
 import { PdfRenderer } from './generator/pdf.renderer';
 import { DocxRenderer } from './generator/docx.renderer';
@@ -32,12 +35,22 @@ import { VerificationController } from './verification/verification.controller';
  * quota decorator on the route resolves without it.
  */
 @Module({
-  imports: [ConfigModule, TemplateModule, CompanyModule, AiEngineModule],
+  imports: [
+    ConfigModule,
+    TemplateModule,
+    CompanyModule,
+    AiEngineModule,
+    // The Bull root connection is configured once in NotificationModule, which
+    // is @Global; this only registers the queue this module produces and
+    // consumes.
+    BullModule.registerQueue({ name: QUEUE_NAMES.DOCUMENT_GENERATION }),
+  ],
   controllers: [DocumentController, VerificationController],
   providers: [
     DocumentService,
     DocumentEditService,
     DocumentCreationService,
+    DocumentGenerationProcessor,
     BrowserService,
     PdfRenderer,
     DocxRenderer,

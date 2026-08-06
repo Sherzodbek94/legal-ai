@@ -24,6 +24,13 @@ import { CompanyService } from '../../company/company.service';
 import { AiEngineService } from '../../ai-engine/ai-engine.service';
 import { UsageService } from '../../billing/limits/usage.service';
 import { quotaRefusal } from '../../billing/limits/quota-refusal';
+import { InjectQueue } from '@nestjs/bullmq';
+import type { Queue } from 'bullmq';
+import {
+  DEFAULT_JOB_OPTIONS,
+  QUEUE_NAMES,
+  type DocumentGenerationJob,
+} from '../../notification/queues/queue.constants';
 import { collectPlaceholders, interpolateContent } from './interpolate-content';
 import { draftToContent, draftToSummary } from './draft-to-content';
 import type { TipTapNode } from '../generator/tiptap-node';
@@ -66,6 +73,8 @@ export class DocumentCreationService {
     private readonly companies: CompanyService,
     private readonly aiEngine: AiEngineService,
     private readonly usage: UsageService,
+    @InjectQueue(QUEUE_NAMES.DOCUMENT_GENERATION)
+    private readonly generationQueue: Queue<DocumentGenerationJob>,
   ) {}
 
   async create(dto: CreateDocumentDto, user: AuthenticatedUser) {
@@ -103,12 +112,27 @@ export class DocumentCreationService {
       });
     }
 
-    const body = dto.useAi
-      ? await this.buildWithAi(dto, template.name, validation.promptVariables, user)
-      : this.buildFromTemplate(
-          version.content,
-          formatValuesForDocument(schema, validation.values),
-        );
+    /*
+     * The interpolated template is the body either way.
+     *
+     * With `useAi` it is a floor rather than the finished article: the row is
+     * written with it, the draft is queued, and the worker replaces the content
+     * if the model answers. That ordering is what makes a failed draft
+     * survivable — the customer is never left holding a half-created document,
+     * because the document was complete before the model was ever called.
+     *
+     * It also takes the AI call out of the request. Drafting runs into minutes;
+     * holding an HTTP request open for it is what produced a "Generating…"
+     * button that never resolved.
+     */
+    const body = this.buildFromTemplate(
+      version.content,
+      formatValuesForDocument(schema, validation.values),
+    );
+
+    const reservation = dto.useAi
+      ? await this.reserveDraft(companyId)
+      : undefined;
 
     const document = await this.persist({
       companyId,
@@ -116,11 +140,25 @@ export class DocumentCreationService {
       templateVersionId: version.id,
       createdById: user.id,
       title: dto.title?.trim() || template.name,
-      body,
+      body: dto.useAi
+        ? { ...body, status: GeneratedDocumentStatus.GENERATING }
+        : body,
       // The values as validated, not as rendered: reproducing a generation
       // needs the inputs, and the rendered strings are derived from them.
       promptVariables: validation.values,
     });
+
+    if (dto.useAi) {
+      await this.queueDraft(document.id, {
+        companyId,
+        userId: user.id,
+        reservation,
+        documentType: template.name,
+        locale: dto.locale ?? 'uz-Latn',
+        variables: validation.promptVariables,
+        instructions: dto.instructions,
+      });
+    }
 
     return {
       ...document,
@@ -129,6 +167,69 @@ export class DocumentCreationService {
       // one positioned to notice a blank should have been filled.
       unresolvedVariables: body.unresolved,
     };
+  }
+
+  /**
+   * Charges the AI allowance before the job is queued.
+   *
+   * At enqueue rather than in the worker, so a refusal reaches the caller while
+   * they are still looking at the form, and so a plan cannot be exceeded by
+   * filling the queue faster than it drains. The worker hands it back if the
+   * draft never lands.
+   */
+  private async reserveDraft(companyId: string) {
+    const decision = await this.usage.reserve(
+      companyId,
+      UsageMetric.AI_GENERATIONS,
+    );
+    if (!decision.allowed) {
+      throw quotaRefusal(UsageMetric.AI_GENERATIONS, decision);
+    }
+    return decision.reservation;
+  }
+
+  /**
+   * Queues the draft, and treats a queue that will not take it as survivable.
+   *
+   * The document already exists with its template body, so a Redis outage here
+   * costs the customer a drafting run, not their document. Throwing would undo
+   * a create that had already succeeded.
+   */
+  private async queueDraft(
+    documentId: string,
+    job: Omit<DocumentGenerationJob, 'documentId'>,
+  ): Promise<void> {
+    try {
+      await this.generationQueue.add(
+        'draft',
+        { documentId, ...job },
+        {
+          ...DEFAULT_JOB_OPTIONS,
+          // Three, not the notification default of five: each attempt is a
+          // minutes-long metered call, and a provider that has failed three
+          // times is not going to answer on the fifth.
+          attempts: 3,
+          // The document id, so a retried create cannot queue the same draft
+          // twice.
+          jobId: documentId,
+        },
+      );
+    } catch (error) {
+      this.logger.error(
+        `Could not queue an AI draft for document ${documentId}; it keeps its template text: ${
+          (error as Error)?.message ?? 'unknown error'
+        }`,
+      );
+      if (job.reservation) {
+        await this.usage.release(job.reservation as never);
+      }
+      await this.prisma.client.generatedDocument
+        .update({
+          where: { id: documentId },
+          data: { status: GeneratedDocumentStatus.GENERATED },
+        })
+        .catch(() => undefined);
+    }
   }
 
   // ---------------------------------------------------------------------------

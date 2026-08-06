@@ -11,6 +11,7 @@ import { apiGet } from '@/lib/api';
 import { apiBaseUrl } from '@/lib/api-config';
 import { formatDateTime } from '@/lib/format';
 import { DOCUMENT_STATUS_TONE, EDITABLE, SUBMITTABLE } from '@/lib/document-status';
+import { GeneratingNotice } from '@/components/documents/generating-notice';
 import { decideApproval, submitForApproval } from './actions';
 
 interface DocumentDetail {
@@ -107,6 +108,8 @@ export default async function DocumentPage({
           {doc.templateVersionId ? ' · pinned to the version that produced it' : ''}
         </p>
       </div>
+
+      {doc.status === 'GENERATING' ? <GeneratingNotice /> : null}
 
       {doc.aiSummary ? (
         <div className="rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm">

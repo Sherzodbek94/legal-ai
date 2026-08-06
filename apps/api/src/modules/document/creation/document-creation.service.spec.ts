@@ -59,6 +59,14 @@ function build(overrides: {
       documentTemplate: {
         findFirst: jest.fn(async () => ({ id: 'tpl-1', name: 'Supply Agreement' })),
       },
+      // Used only on the give-up paths, where the row already exists and its
+      // status has to stop claiming a draft is still running.
+      generatedDocument: {
+        update: jest.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+          id: 'doc-1',
+          ...data,
+        })),
+      },
       $transaction: jest.fn(async (work: (t: typeof tx) => unknown) => work(tx)),
     },
   };
@@ -120,15 +128,28 @@ function build(overrides: {
     release: jest.fn(async () => undefined),
   };
 
+  // Parameters declared so `mock.calls[n][1]` types as the job rather than as
+  // an element of an empty tuple.
+  const generationQueue = {
+    add: jest.fn(
+      async (
+        _name: string,
+        _job: Record<string, any>,
+        _options: Record<string, any>,
+      ) => ({ id: 'job_1' }),
+    ),
+  };
+
   const service = new DocumentCreationService(
     prisma as never,
     versions as never,
     companies as never,
     aiEngine as never,
     usage as never,
+    generationQueue as never,
   );
 
-  return { service, prisma, versions, companies, aiEngine, usage, tx, created };
+  return { service, prisma, versions, companies, aiEngine, usage, tx, created, generationQueue };
 }
 
 const dto = (overrides: Partial<CreateDocumentDto> = {}): CreateDocumentDto => ({
@@ -332,45 +353,75 @@ describe('DocumentCreationService', () => {
   });
 
   describe('AI drafting', () => {
-    it('builds the body from the model draft', async () => {
+    /*
+     * Drafting is queued, not awaited. The row is written first, with the
+     * interpolated template as its body, so a failed or slow draft is never
+     * the difference between a document and no document — only between the
+     * template text and a drafted version of it.
+     */
+
+    it('returns immediately with the template body, marked generating', async () => {
       const { service, aiEngine } = build();
 
       const document = await service.create(dto({ useAi: true }), USER);
 
-      expect(aiEngine.generateLegalDocument).toHaveBeenCalledTimes(1);
-      expect(document.status).toBe(GeneratedDocumentStatus.GENERATED);
+      expect(aiEngine.generateLegalDocument).not.toHaveBeenCalled();
+      expect(document.status).toBe(GeneratedDocumentStatus.GENERATING);
     });
 
-    it("carries the model's own caveats into the summary", async () => {
-      const { service } = build();
-
-      const document = await service.create(dto({ useAi: true }), USER);
-
-      expect(document.aiSummary).toContain('bank details');
-    });
-
-    it('attributes the call to the caller, never to the request body', async () => {
-      const { service, aiEngine } = build();
+    it('writes the document before queueing anything', async () => {
+      // The ordering the whole design rests on: a queue that refuses the job
+      // must not be able to lose the document.
+      const { service, tx } = build();
 
       await service.create(dto({ useAi: true }), USER);
 
-      expect(aiEngine.generateLegalDocument).toHaveBeenCalledWith(
-        expect.objectContaining({ companyId: 'company-1', userId: 'user-1' }),
-      );
+      expect(tx.generatedDocument.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('queues a job carrying everything the worker needs', async () => {
+      const { service, generationQueue } = build();
+
+      await service.create(dto({ useAi: true }), USER);
+
+      const [, job] = generationQueue.add.mock.calls[0];
+      expect(job).toMatchObject({
+        companyId: 'company-1',
+        userId: 'user-1',
+        documentType: expect.any(String),
+      });
+      expect(job.documentId).toEqual(expect.any(String));
     });
 
     it('sends sanitised prompt variables, not raw values', async () => {
-      const { service, aiEngine } = build();
+      const { service, generationQueue } = build();
 
       await service.create(
         dto({ useAi: true, variables: { party: 'Beta <LLC>', amount: 1 } }),
         USER,
       );
 
-      const sent = aiEngine.generateLegalDocument.mock.calls[0][0];
       // Angle brackets are stripped on the prompt path because they delimit a
       // data block — a defence that does not apply on the document path.
-      expect(sent.variables.party).toBe('Beta LLC');
+      expect(generationQueue.add.mock.calls[0][1].variables.party).toBe('Beta LLC');
+    });
+
+    it('keys the job on the document, so a retried create cannot draft twice', async () => {
+      const { service, generationQueue } = build();
+
+      const document = await service.create(dto({ useAi: true }), USER);
+
+      expect(generationQueue.add.mock.calls[0][2].jobId).toBe(document.id);
+    });
+
+    it('gives up after three attempts, not the notification default of five', async () => {
+      // Each attempt is a minutes-long metered call; a provider that has failed
+      // three times will not answer on the fifth.
+      const { service, generationQueue } = build();
+
+      await service.create(dto({ useAi: true }), USER);
+
+      expect(generationQueue.add.mock.calls[0][2].attempts).toBe(3);
     });
 
     it('consumes AI quota separately from the document allowance', async () => {
@@ -384,34 +435,62 @@ describe('DocumentCreationService', () => {
       );
     });
 
-    it('refuses when the AI allowance is spent', async () => {
-      const { service, aiEngine } = build({ quotaAllowed: false });
+    it('charges the allowance before queueing, not in the worker', async () => {
+      // So the refusal reaches the caller while they are still looking at the
+      // form, and so a plan cannot be exceeded by filling the queue.
+      const { service, generationQueue } = build({ quotaAllowed: false });
 
       await expect(service.create(dto({ useAi: true }), USER)).rejects.toThrow(
         ForbiddenException,
       );
-      expect(aiEngine.generateLegalDocument).not.toHaveBeenCalled();
+      expect(generationQueue.add).not.toHaveBeenCalled();
     });
 
-    it('hands the reservation back when the provider fails', async () => {
-      const { service, usage } = build({ aiError: new Error('provider down') });
+    it('queues nothing when the caller did not ask for a draft', async () => {
+      const { service, generationQueue, usage } = build();
 
-      await expect(service.create(dto({ useAi: true }), USER)).rejects.toThrow(
-        'provider down',
-      );
+      await service.create(dto({ useAi: false }), USER);
 
-      // A vendor outage must not cost the customer a generation.
-      expect(usage.release).toHaveBeenCalledTimes(1);
+      expect(generationQueue.add).not.toHaveBeenCalled();
+      expect(usage.reserve).not.toHaveBeenCalled();
     });
 
-    it('writes nothing when the provider fails', async () => {
-      const { service, tx } = build({ aiError: new Error('provider down') });
+    describe('when the queue will not take the job', () => {
+      const queueDown = () => {
+        const context = build();
+        context.generationQueue.add.mockRejectedValue(new Error('redis down'));
+        return context;
+      };
 
-      await expect(
-        service.create(dto({ useAi: true }), USER),
-      ).rejects.toThrow();
+      it('keeps the document rather than failing the create', async () => {
+        // The document already exists with its template body. Throwing here
+        // would undo a create that had already succeeded.
+        const { service } = queueDown();
 
-      expect(tx.generatedDocument.create).not.toHaveBeenCalled();
+        await expect(
+          service.create(dto({ useAi: true }), USER),
+        ).resolves.toMatchObject({ id: expect.any(String) });
+      });
+
+      it('hands the reservation back', async () => {
+        const { service, usage } = queueDown();
+
+        await service.create(dto({ useAi: true }), USER);
+
+        expect(usage.release).toHaveBeenCalledTimes(1);
+      });
+
+      it('clears the generating status, so nothing waits on a job that will never run', async () => {
+        const { service, prisma } = queueDown();
+
+        await service.create(dto({ useAi: true }), USER);
+
+        expect(prisma.client.generatedDocument.update).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: { status: GeneratedDocumentStatus.GENERATED },
+          }),
+        );
+      });
     });
   });
 

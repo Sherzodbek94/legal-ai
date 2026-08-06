@@ -20,6 +20,14 @@ export const QUEUE_NAMES = {
   EMAIL: 'notifications-email',
   SMS: 'notifications-sms',
   TELEGRAM: 'notifications-telegram',
+  /**
+   * AI document drafting.
+   *
+   * Not a notification channel, but it shares the Redis connection, the job
+   * options and the cleanup policy, and splitting the constants across two
+   * files to make a taxonomy point would mean two places to keep in step.
+   */
+  DOCUMENT_GENERATION: 'document-generation',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -87,7 +95,53 @@ export const WORKER_LIMITS: Record<
     concurrency: 3,
     limiter: { max: 20, duration: 1000 },
   },
+  /**
+   * Two at a time, because each one is a minutes-long call to a metered
+   * provider rather than a message handed to a gateway. Concurrency here buys
+   * nothing a customer notices — their own document is not drafted faster
+   * because someone else's is running beside it — and every extra worker is
+   * another request against the provider's rate limit and another chance to be
+   * throttled mid-draft.
+   */
+  [QUEUE_NAMES.DOCUMENT_GENERATION]: {
+    concurrency: 2,
+  },
 };
+
+/**
+ * One AI draft.
+ *
+ * The document row already exists and already holds the interpolated template
+ * body, so this job improves a usable document rather than producing one from
+ * nothing. That is what makes a failed draft survivable: there is nothing to
+ * roll back and nothing left in a broken state.
+ */
+export interface DocumentGenerationJob {
+  /** `GeneratedDocument.id` — the row the worker updates when it finishes. */
+  documentId: string;
+  companyId: string;
+  /** Who asked, so the result can be pushed back to them. */
+  userId: string;
+  /**
+   * Charged at enqueue, so a plan cannot be exceeded by filling the queue.
+   * Released by the worker only once the last attempt has failed — releasing
+   * per attempt would hand back the same allowance several times.
+   *
+   * Carried by value because it is already a plain `{companyId, metric,
+   * periodStart, amount}` and a job payload has to survive a round trip
+   * through Redis.
+   */
+  reservation?: {
+    companyId: string;
+    metric: string;
+    periodStart: string | Date;
+    amount: number;
+  };
+  documentType: string;
+  locale: string;
+  variables: Record<string, string>;
+  instructions?: string;
+}
 
 export function queueForChannel(channel: NotificationChannel): QueueName | null {
   switch (channel) {
