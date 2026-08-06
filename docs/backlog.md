@@ -121,7 +121,7 @@ missing client timeout, which was the real bug and is fixed in `e9c5347`.
 Left in rather than deleted, because "we already looked at this" is worth more
 than a shorter document.
 
-**3.2 Generation is synchronous.**
+**3.2 Generation is synchronous.** *(designed below, not started)*
 `GeneratedDocumentStatus.GENERATING` exists in the schema and nothing sets it.
 The browser holds an HTTP request open for the entire AI call — which is why an
 absent client timeout could freeze the button for half an hour. `e9c5347` bounds
@@ -130,6 +130,51 @@ designed shape is already in the schema: create the document `GENERATING`,
 return immediately, generate on a worker, update status, push over the existing
 Socket.IO gateway. The notification queues and the gateway are both already
 built.
+
+#### 3.2 in detail — read this before starting
+
+Three things make it more than "move the call to a worker", and all three are
+currently load-bearing in the synchronous path.
+
+**Quota is reserved before the call and released on failure.** `buildWithAi`
+reserves `AI_GENERATIONS`, and on a provider outage releases it again with the
+comment that an outage must not cost the customer a generation. Move the call to
+a worker and the reservation has to travel with the job: reserve at enqueue (so
+the refusal is immediate and the queue cannot be used to exceed a plan), release
+in the processor's failure path, and release on a job that exhausts its retries
+and dies — the last of which has no equivalent today.
+
+**Failure currently falls back to the plain template.** The route throws, the
+web action shows a message, and the drafter can retry with AI off. Once the
+document row exists as `GENERATING`, "throw" is no longer available: the
+processor has to decide between marking it `FAILED` and writing the interpolated
+template body instead. The second is closer to the current behaviour and leaves
+the drafter with something usable; it should say in the document which happened.
+
+**`FAILED` has no route back.** The status exists and `document-edit.service`
+treats `GENERATING` as locked. A document stuck in either state with no retry
+action is a dead row in a customer's list. Whatever the processor writes, the
+UI needs a way out.
+
+The shape, once those are settled:
+
+```
+create(useAi)  reserve → persist GENERATING → enqueue → return 202 + id
+processor      generate → update GENERATED | FAILED | template-fallback
+               → release reservation on failure
+               → gateway.pushToUser(document.status_changed)
+web            detail page subscribes while GENERATING; badge already renders
+```
+
+The queue infrastructure is already there — `QUEUE_NAMES`, `DEFAULT_JOB_OPTIONS`
+and a `BaseNotificationProcessor` worth copying — but it is per notification
+channel, so this needs a fourth queue rather than reusing one. The Socket.IO
+gateway and `pushToUser` already exist and need no changes.
+
+**Do not land the API half alone.** Returning `GENERATING` to a web app that
+does not subscribe leaves the drafter on a document page that says "generating"
+forever until they reload by hand — worse than today's four-minute bound, which
+at least resolves by itself.
 
 ### P1 — untested code that decides something important
 
