@@ -131,6 +131,35 @@ test.describe('PDF export', () => {
     expect(body.subarray(0, 4).toString('latin1')).toBe('%PDF');
     expect(body.length).toBeGreaterThan(1000);
 
+    // The file's own header comment names this test as the reason it exists,
+    // but until now nothing here actually read the Cyrillic back out — a
+    // structurally valid PDF with every Cyrillic glyph missing (subsetted out
+    // of the embedded font, or dropped from the ToUnicode map) would still
+    // pass every assertion above it. `getTextContent()` reads the PDF's own
+    // text layer, the same data a copy-paste or a screen reader would see, so
+    // a character that survives here is one that did not silently vanish
+    // between the template and the file — the specific failure this suite is
+    // named for. It does not, on its own, prove no GLYPH renders as a tofu
+    // box: that is a font-availability question for the environment running
+    // Chromium, addressed by installing Cyrillic-capable fonts where the API
+    // runs (see apps/api/Dockerfile and deploy.yml's test-e2e-browser job).
+    const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const task = pdfjs.getDocument({ data: new Uint8Array(body), disableFontFace: true });
+    const pdf = await task.promise;
+    let extractedText = '';
+    try {
+      for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+        const page = await pdf.getPage(pageNumber);
+        const content = await page.getTextContent();
+        extractedText += content.items.map((item) => ('str' in item ? item.str : '')).join(' ');
+        page.cleanup();
+      }
+    } finally {
+      await task.destroy();
+    }
+    expect(extractedText).toContain('Тестовый договор поставки');
+    expect(extractedText).toContain('Северный Ветер');
+
     await api.dispose();
   });
 

@@ -182,20 +182,28 @@ jobs:
         run: npm run test:e2e
 
   # ---------------------------------------------------------------------------
-  # 1c. Playwright — the full stack in a real browser: cookie `sameSite`
-  #     behaviour, credentialed CORS, and whether Cyrillic/Uzbek text survives
-  #     into a generated PDF. Reported but not yet a required gate: this suite
-  #     has never had a confirmed green run (see README "Known gaps"), so
-  #     failing it here surfaces the first real signal without blocking every
-  #     deploy on an unproven suite. Promote to a required `needs` on `build`
-  #     once it has run clean.
+  # 1c. Playwright — the full stack in a real browser. A REQUIRED gate: `build`
+  #     now lists this in `needs`, so a red run here blocks the image the same
+  #     way a red unit or e2e run does. It covers what only a real browser
+  #     reveals and nothing else in this pipeline checks:
+  #
+  #       * cookie `sameSite`/`secure` behaviour across the web and API
+  #         origins — Firefox enforces this more strictly than Chromium, which
+  #         is why both projects run, not just one;
+  #       * credentialed CORS actually completing a cross-origin request
+  #         rather than just returning permissive-looking headers;
+  #       * the WebSocket upgrade the notification bell depends on;
+  #       * Cyrillic/Uzbek text surviving into a generated PDF — see the font
+  #         install step below and the assertion in
+  #         document-generation.spec.ts, which reads the PDF's own text layer
+  #         back out rather than trusting that a 200 with the right
+  #         content-type means the content is correct.
   # ---------------------------------------------------------------------------
   test-e2e-browser:
     name: Test (browser)
     runs-on: ubuntu-latest
     needs: test
     timeout-minutes: 20
-    continue-on-error: true
 
     services:
       postgres:
@@ -243,6 +251,16 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium firefox
 
+      # `--with-deps` above installs what Chromium/Firefox need to LAUNCH, not
+      # a broad Unicode font set. Without this, ubuntu-latest's default fonts
+      # are Latin-only and every Cyrillic or Uzbek character in a generated
+      # PDF renders as an empty box — invisible on a developer's own machine,
+      # which already has system Cyrillic fonts, and exactly the failure this
+      # job exists to catch. Matches apps/api/Dockerfile's runtime image,
+      # which installs the same package for the same reason.
+      - name: Install fonts for Cyrillic/Uzbek PDF rendering
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-core
+
       - name: Generate Prisma client
         run: npx prisma generate --schema packages/database/prisma/schema.prisma
 
@@ -269,7 +287,7 @@ jobs:
   build:
     name: Build images
     runs-on: ubuntu-latest
-    needs: [test, test-e2e]
+    needs: [test, test-e2e, test-e2e-browser]
     # Never publishes from a pull request: the image would carry unreviewed code
     # under a tag someone could deploy.
     if: github.event_name != 'pull_request'
