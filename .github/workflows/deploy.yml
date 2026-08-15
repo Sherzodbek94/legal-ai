@@ -100,6 +100,19 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate --schema packages/database/prisma/schema.prisma
 
+      # `@legaltech/database`'s package.json resolves through `dist/index.js`
+      # and `dist/index.d.ts` (see its "main"/"types" fields), which only this
+      # produces — `prisma generate` above builds the Prisma CLIENT, not this
+      # workspace's own compiled output. Without it, every step below that
+      # imports `@legaltech/database` (Typecheck, Test) fails immediately with
+      # "Cannot find module '@legaltech/database'", which is exactly what a
+      # fresh CI checkout does and a developer's machine usually does not: a
+      # local `npm run dev` or an earlier `npm run build` leaves `dist/` on
+      # disk, masking this on every machine except the one CI actually runs
+      # on.
+      - name: Build @legaltech/database
+        run: npm run build --workspace=@legaltech/database
+
       # Applies every migration to a real database. This is the only place the
       # hand-written SQL — the generated tsvector column, the HNSW indexes, the
       # partial unique index on the global taxonomy — is actually executed, and a
@@ -174,6 +187,12 @@ jobs:
 
       - name: Generate Prisma client
         run: npx prisma generate --schema packages/database/prisma/schema.prisma
+
+      # See the same step in the unit-test job above: ts-jest resolves
+      # `@legaltech/database` through its compiled `dist/`, which nothing but
+      # this step produces.
+      - name: Build @legaltech/database
+        run: npm run build --workspace=@legaltech/database
 
       # global-setup.ts applies migrations itself (`prisma migrate reset`
       # against TEST_DATABASE_URL) before any suite runs, so there is no
@@ -263,6 +282,16 @@ jobs:
 
       - name: Generate Prisma client
         run: npx prisma generate --schema packages/database/prisma/schema.prisma
+
+      # webServer in playwright.config.ts boots the API with `nest start
+      # --watch`, which resolves `@legaltech/database` the same way Node
+      # always does: through its `dist/`. See the same step in the unit-test
+      # job — without it the API crashes on boot with "Cannot find module
+      # '@legaltech/database'" the instant Playwright's readiness check hits
+      # it, which reads as a webServer timeout, not the missing build step
+      # that actually caused it.
+      - name: Build @legaltech/database
+        run: npm run build --workspace=@legaltech/database
 
       - name: Apply migrations
         run: npx prisma migrate deploy --schema packages/database/prisma/schema.prisma
